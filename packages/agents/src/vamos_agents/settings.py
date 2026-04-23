@@ -31,6 +31,6 @@ def get_settings() -> Settings:
         langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
         langfuse_host=os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com"),
         data_dir=Path(os.getenv("VAMOS_DATA_DIR", "./data")),
-        max_output_tokens=int(os.getenv("VAMOS_MAX_TOKENS", "1536")),
+        max_output_tokens=int(os.getenv("VAMOS_MAX_TOKENS", "1024")),
         request_timeout_s=float(os.getenv("VAMOS_TIMEOUT_S", "60")),
     )

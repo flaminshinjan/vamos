@@ -13,10 +13,10 @@ export function CausalGraphCard({
   portfolio: Portfolio;
   topNews: RelevantNews[];
 }) {
-  // Sources: top 3 news items by relevance
+  // News (top 3 by relevance)
   const news: Node[] = topNews.slice(0, 3).map((n) => ({
     id: n.article.id,
-    label: shorten(n.article.headline, 30),
+    label: shorten(n.article.headline, 28),
     sent:
       n.article.sentiment === "POSITIVE"
         ? "pos"
@@ -25,7 +25,6 @@ export function CausalGraphCard({
           : "neu",
   }));
 
-  // Sectors mentioned in causal chains
   const sectors: Node[] = dedupe(
     briefing.causal_chains.slice(0, 4).map((c) => ({
       id: c.sector,
@@ -34,10 +33,7 @@ export function CausalGraphCard({
     })),
   );
 
-  // Stocks from the causal chains — filter to held stocks only
-  const heldSymbols = new Set(
-    portfolio.holdings.stocks.map((h) => h.symbol),
-  );
+  const heldSymbols = new Set(portfolio.holdings.stocks.map((h) => h.symbol));
   const stocks = dedupe(
     briefing.causal_chains.flatMap((c) =>
       c.stocks
@@ -47,13 +43,12 @@ export function CausalGraphCard({
           return {
             id: s,
             sector: c.sector,
-            day: h?.day_change_percent ?? 0,
+            day: h?.day_change_percent ?? c.portfolio_impact_pct,
           };
         }),
     ),
   ).slice(0, 6);
 
-  // News → Sector links
   const nsLinks = briefing.causal_chains.slice(0, 4).flatMap((c) =>
     topNews
       .slice(0, 3)
@@ -65,12 +60,17 @@ export function CausalGraphCard({
       .map((n) => [n.article.id, c.sector] as const),
   );
 
-  // Sector → Stock links
   const ssLinks = stocks.map((s) => [s.sector, s.id] as const);
 
-  const W = 660;
-  const H = Math.max(360, Math.max(news.length, sectors.length, stocks.length) * 45 + 60);
-  const cols = [20, 200, 400, 620];
+  // Geometry — more generous margins, portfolio node pulled inside viewport
+  const W = 720;
+  const H = Math.max(
+    360,
+    Math.max(news.length, sectors.length, stocks.length) * 48 + 60,
+  );
+  const cols = [32, 210, 400, 600]; // News, Sector, Stock, Portfolio
+  const circleR = 44;
+
   const yFor = (n: number, i: number) => {
     const gap = (H - 60) / Math.max(1, n);
     return 30 + gap * (i + 0.5);
@@ -88,6 +88,8 @@ export function CausalGraphCard({
   };
 
   const dayPct = briefing.portfolio_analytics.day_summary.day_change_percent;
+  const posColor = "#8FCB9F";
+  const negColor = "#EAAC9B";
 
   return (
     <div className="card fade-up">
@@ -97,14 +99,19 @@ export function CausalGraphCard({
         </div>
         <div className="card-sub">threshold 0.50</div>
       </div>
-      <div className="card-body">
-        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto" }}>
+      <div className="card-body" style={{ overflow: "hidden" }}>
+        <svg
+          viewBox={`0 0 ${W} ${H}`}
+          style={{ width: "100%", height: "auto", display: "block" }}
+          preserveAspectRatio="xMidYMid meet"
+        >
+          {/* Column headers */}
           {["News", "Sector", "Stock", "Portfolio"].map((l, i) => (
             <text
               key={l}
               x={cols[i]}
               y={14}
-              textAnchor={i === 3 ? "end" : "start"}
+              textAnchor={i === 3 ? "middle" : "start"}
               fontSize="9"
               fontFamily="JetBrains Mono"
               fill="var(--ink-4)"
@@ -113,59 +120,61 @@ export function CausalGraphCard({
               {String(i + 1).padStart(2, "0")} · {l.toUpperCase()}
             </text>
           ))}
+
+          {/* News → Sector links */}
           {nsLinks.map(([a, b], i) => {
             const n = news.find((x) => x.id === a);
-            if (!n || !newsY[a] || !secY[b]) return null;
+            if (!n || newsY[a] === undefined || secY[b] === undefined) return null;
             return (
               <path
                 key={`ns${i}`}
-                d={curve(cols[0] + 150, newsY[a], cols[1] - 4, secY[b])}
+                d={curve(cols[0] + 156, newsY[a], cols[1] - 4, secY[b])}
                 stroke={stroke(n.sent)}
-                strokeOpacity="0.42"
-                strokeWidth="1.4"
+                strokeOpacity="0.45"
+                strokeWidth="1.5"
                 fill="none"
                 strokeDasharray="400"
                 strokeDashoffset="400"
-                style={{
-                  animation: `draw 0.9s ease forwards ${0.1 + i * 0.1}s`,
-                }}
+                style={{ animation: `draw 0.9s ease forwards ${0.1 + i * 0.1}s` }}
               />
             );
           })}
+
+          {/* Sector → Stock links */}
           {ssLinks.map(([sec, stk], i) => {
             const s = sectors.find((x) => x.id === sec);
-            if (!s || !secY[sec] || !stockY[stk]) return null;
+            if (!s || secY[sec] === undefined || stockY[stk] === undefined) return null;
             return (
               <path
                 key={`ss${i}`}
-                d={curve(cols[1] + 130, secY[sec], cols[2] - 4, stockY[stk])}
+                d={curve(cols[1] + 138, secY[sec], cols[2] - 4, stockY[stk])}
                 stroke={stroke(s.sent)}
-                strokeOpacity="0.35"
-                strokeWidth="1.2"
+                strokeOpacity="0.4"
+                strokeWidth="1.3"
                 fill="none"
                 strokeDasharray="400"
                 strokeDashoffset="400"
-                style={{
-                  animation: `draw 0.9s ease forwards ${0.4 + i * 0.08}s`,
-                }}
+                style={{ animation: `draw 0.9s ease forwards ${0.4 + i * 0.08}s` }}
               />
             );
           })}
+
+          {/* Stock → Portfolio links */}
           {stocks.map((s, i) => (
             <path
               key={`sp${i}`}
-              d={curve(cols[2] + 84, stockY[s.id], cols[3] - 18, portY)}
+              d={curve(cols[2] + 92, stockY[s.id], cols[3] - circleR - 4, portY)}
               stroke={s.day >= 0 ? "#2F6B3F" : "#9A3B2C"}
-              strokeOpacity="0.35"
-              strokeWidth="1"
+              strokeOpacity="0.4"
+              strokeWidth="1.1"
               fill="none"
               strokeDasharray="400"
               strokeDashoffset="400"
-              style={{
-                animation: `draw 0.9s ease forwards ${0.7 + i * 0.06}s`,
-              }}
+              style={{ animation: `draw 0.9s ease forwards ${0.7 + i * 0.06}s` }}
             />
           ))}
+
+          {/* News nodes */}
           {news.map((n, i) => (
             <g
               key={n.id}
@@ -174,21 +183,16 @@ export function CausalGraphCard({
               <rect
                 x={cols[0]}
                 y={newsY[n.id] - 14}
-                width="150"
+                width="156"
                 height="28"
                 rx="4"
                 fill="var(--bg-elev)"
                 stroke={stroke(n.sent)}
-                strokeOpacity="0.35"
+                strokeOpacity="0.4"
               />
-              <circle
-                cx={cols[0] + 10}
-                cy={newsY[n.id]}
-                r="2.5"
-                fill={stroke(n.sent)}
-              />
+              <circle cx={cols[0] + 10} cy={newsY[n.id]} r="2.5" fill={stroke(n.sent)} />
               <text
-                x={cols[0] + 19}
+                x={cols[0] + 20}
                 y={newsY[n.id] + 3}
                 fontSize="10"
                 fill="var(--ink-2)"
@@ -197,6 +201,8 @@ export function CausalGraphCard({
               </text>
             </g>
           ))}
+
+          {/* Sector nodes */}
           {sectors.map((s, i) => (
             <g
               key={s.id}
@@ -205,15 +211,15 @@ export function CausalGraphCard({
               <rect
                 x={cols[1] - 4}
                 y={secY[s.id] - 14}
-                width="134"
+                width="142"
                 height="28"
                 rx="4"
                 fill={s.sent === "pos" ? "var(--pos-soft)" : "var(--neg-soft)"}
                 stroke={stroke(s.sent)}
-                strokeOpacity="0.5"
+                strokeOpacity="0.55"
               />
               <text
-                x={cols[1] + 63}
+                x={cols[1] + 67}
                 y={secY[s.id] + 4}
                 fontSize="11.5"
                 fill={stroke(s.sent)}
@@ -224,6 +230,8 @@ export function CausalGraphCard({
               </text>
             </g>
           ))}
+
+          {/* Stock nodes */}
           {stocks.map((s, i) => (
             <g
               key={s.id}
@@ -232,14 +240,14 @@ export function CausalGraphCard({
               <rect
                 x={cols[2] - 4}
                 y={stockY[s.id] - 14}
-                width="88"
+                width="96"
                 height="28"
                 rx="4"
                 fill="var(--bg-elev)"
                 stroke="var(--line-strong)"
               />
               <text
-                x={cols[2] + 5}
+                x={cols[2] + 4}
                 y={stockY[s.id] + 4}
                 fontSize="10.5"
                 fontFamily="JetBrains Mono"
@@ -248,37 +256,47 @@ export function CausalGraphCard({
                 {s.id}
               </text>
               <text
-                x={cols[2] + 78}
+                x={cols[2] + 88}
                 y={stockY[s.id] + 4}
                 fontSize="9.5"
                 fontFamily="JetBrains Mono"
                 textAnchor="end"
-                fill={s.day >= 0 ? "var(--pos)" : "var(--neg)"}
+                fill={s.day >= 0 ? "#2F6B3F" : "#9A3B2C"}
               >
                 {s.day >= 0 ? "+" : "−"}
                 {Math.abs(s.day).toFixed(1)}%
               </text>
             </g>
           ))}
+
+          {/* Portfolio node — circle with centered label + day P&L */}
           <g style={{ animation: "fadeIn 0.5s ease both 1.1s" }}>
-            <circle cx={cols[3]} cy={portY} r="36" fill="var(--ink)" />
+            <circle
+              cx={cols[3]}
+              cy={portY}
+              r={circleR}
+              fill="var(--ink)"
+            />
             <text
               x={cols[3]}
-              y={portY - 3}
-              textAnchor="end"
-              fontSize="9"
+              y={portY - 8}
+              textAnchor="middle"
+              fontSize="8.5"
               fontFamily="JetBrains Mono"
-              fill="rgba(255,253,248,0.5)"
+              letterSpacing="1.8"
+              fill="var(--bg)"
+              opacity="0.55"
             >
               PORTFOLIO
             </text>
             <text
               x={cols[3]}
-              y={portY + 13}
-              textAnchor="end"
-              fontSize="15"
+              y={portY + 14}
+              textAnchor="middle"
+              fontSize="18"
               fontFamily="Instrument Serif"
-              fill={dayPct >= 0 ? "#8FCB9F" : "#EAAC9B"}
+              letterSpacing="-0.01em"
+              fill={dayPct >= 0 ? posColor : negColor}
             >
               {dayPct >= 0 ? "+" : "−"}
               {Math.abs(dayPct).toFixed(2)}%

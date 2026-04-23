@@ -15,6 +15,7 @@ import {
   threadToMarkdown,
 } from "@/lib/export";
 import { FOLLOWUPS, SUGGESTED_PROMPTS, classifyIntent, type Intent } from "@/lib/intent";
+import { tryParsePartial } from "@/lib/partialJson";
 import { readSSE } from "@/lib/sse";
 import {
   deriveTitle,
@@ -135,9 +136,13 @@ export function Chat({
     (msg: Msg) => {
       setMessages((m) => {
         const next = [...m, msg];
-        // Persist on user messages and on every terminal agent message; skip
-        // mid-stream updates (reasoning-only) to avoid thrashing localStorage.
-        if (msg.role === "user" || (msg.role === "agent" && msg.kind !== "reasoning")) {
+        // Persist on user messages and stable agent messages. Skip mid-stream
+        // kinds (reasoning + streaming_briefing) to avoid thrashing
+        // localStorage on every token; they'll be persisted on completion.
+        const isMidStream =
+          msg.role === "agent" &&
+          (msg.kind === "reasoning" || msg.kind === "streaming_briefing");
+        if (!isMidStream) {
           persist(next);
         }
         return next;
@@ -239,6 +244,25 @@ export function Chat({
         steps: DEFAULT_STEPS.map((s) => ({ ...s })),
       });
 
+      // For briefing intent, a streaming card is pushed immediately when the
+      // LLM starts emitting. For causal intent we only want the graph + trace.
+      const briefingId = `a${Date.now()}-brief`;
+      let briefingPushed = false;
+
+      const updateStreaming = (
+        mutate: (
+          m: Extract<Msg, { kind: "streaming_briefing" }>,
+        ) => Extract<Msg, { kind: "streaming_briefing" }>,
+      ) => {
+        setMessages((ms) =>
+          ms.map((x) =>
+            x.id === briefingId && x.role === "agent" && x.kind === "streaming_briefing"
+              ? mutate(x)
+              : x,
+          ),
+        );
+      };
+
       try {
         const res = await fetch("/api/brief/stream", {
           method: "POST",
@@ -251,8 +275,8 @@ export function Chat({
         });
         if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
-        let briefing: AdvisorBriefing | null = null;
-        let evaluation: EvaluationResult | null = null;
+        let finalBriefing: AdvisorBriefing | null = null;
+        let finalEval: EvaluationResult | null = null;
         const t0 = performance.now();
 
         for await (const frame of readSSE(res)) {
@@ -274,10 +298,52 @@ export function Chat({
                   : s,
               ),
             }));
+          } else if (frame.event === "start") {
+            // LLM has begun emitting tokens — show the streaming card so the
+            // user sees content arrive field-by-field instead of all at once.
+            if (intent !== "causal" && !briefingPushed) {
+              briefingPushed = true;
+              push({
+                id: briefingId,
+                role: "agent",
+                kind: "streaming_briefing",
+                accumulated: "",
+                partial: {},
+                briefing: null,
+                evaluation: null,
+              });
+            }
+          } else if (frame.event === "delta") {
+            const d = frame.data as { text?: string };
+            if (intent === "causal" || !d.text) continue;
+            if (!briefingPushed) {
+              briefingPushed = true;
+              push({
+                id: briefingId,
+                role: "agent",
+                kind: "streaming_briefing",
+                accumulated: "",
+                partial: {},
+                briefing: null,
+                evaluation: null,
+              });
+            }
+            updateStreaming((m) => {
+              const nextAcc = m.accumulated + d.text!;
+              const parsed =
+                tryParsePartial<typeof m.partial>(nextAcc) ?? m.partial;
+              return { ...m, accumulated: nextAcc, partial: parsed };
+            });
           } else if (frame.event === "briefing") {
-            briefing = frame.data as AdvisorBriefing;
+            finalBriefing = frame.data as AdvisorBriefing;
+            if (intent !== "causal") {
+              updateStreaming((m) => ({ ...m, briefing: finalBriefing }));
+            }
           } else if (frame.event === "evaluation") {
-            evaluation = frame.data as EvaluationResult;
+            finalEval = frame.data as EvaluationResult;
+            if (intent !== "causal") {
+              updateStreaming((m) => ({ ...m, evaluation: finalEval }));
+            }
           } else if (frame.event === "done") {
             const d = frame.data as {
               latency_ms?: number;
@@ -300,31 +366,40 @@ export function Chat({
           }
         }
 
-        // Persist the final reasoning state now that streaming is complete
-        setMessages((curr) => {
-          persist(curr);
-          return curr;
-        });
+        // Stream finished. Upgrade the streaming card to the clean final
+        // briefing kind so persistence + export use the canonical shape.
+        if (intent !== "causal" && finalBriefing) {
+          setMessages((ms) =>
+            ms.map((x) =>
+              x.id === briefingId && x.role === "agent" && x.kind === "streaming_briefing"
+                ? {
+                    id: briefingId,
+                    role: "agent" as const,
+                    kind: "briefing" as const,
+                    briefing: finalBriefing!,
+                    evaluation: finalEval,
+                  }
+                : x,
+            ),
+          );
+        }
 
-        if (briefing) {
+        if (finalBriefing) {
           push({
             id: `a${Date.now()}g`,
             role: "agent",
             kind: "graph",
-            briefing,
+            briefing: finalBriefing,
             news: relevantNews,
           });
-          if (intent !== "causal") {
-            push({
-              id: `a${Date.now()}b`,
-              role: "agent",
-              kind: "briefing",
-              briefing,
-              evaluation,
-            });
-          }
           push({ id: `a${Date.now()}f`, role: "agent", kind: "followups" });
         }
+
+        // Persist final state
+        setMessages((curr) => {
+          persist(curr);
+          return curr;
+        });
       } catch (err) {
         push({
           id: `a${Date.now()}e`,
@@ -752,6 +827,14 @@ function AgentBody({
   if (msg.kind === "graph") return <GraphWrapper briefing={msg.briefing} news={msg.news} />;
   if (msg.kind === "briefing")
     return <BriefingCard briefing={msg.briefing} evaluation={msg.evaluation} />;
+  if (msg.kind === "streaming_briefing") {
+    // If the final briefing already arrived (stream completed), render the
+    // full card with evaluation. Otherwise show the partial data as it grows.
+    if (msg.briefing) {
+      return <BriefingCard briefing={msg.briefing} evaluation={msg.evaluation} />;
+    }
+    return <BriefingCard briefing={msg.partial} evaluation={null} streaming />;
+  }
   if (msg.kind === "followups")
     return (
       <div className="chips" style={{ marginTop: 4 }}>

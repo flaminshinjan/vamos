@@ -46,6 +46,27 @@ export type SerializedMsg =
       kind: "briefing";
       briefing: AdvisorBriefing;
       evaluation: EvaluationResult | null;
+    }
+  | {
+      // In-flight streaming briefing. Upgraded to `briefing` once the stream
+      // completes. Persisted as-is if the stream was interrupted, so a reload
+      // can still show whatever was rendered.
+      id: string;
+      role: "agent";
+      kind: "streaming_briefing";
+      accumulated: string;
+      partial: {
+        headline?: string;
+        summary?: string;
+        causal_chains?: AdvisorBriefing["causal_chains"];
+        key_insights?: AdvisorBriefing["key_insights"];
+        conflicts?: AdvisorBriefing["conflicts"];
+        recommendations?: AdvisorBriefing["recommendations"];
+        confidence?: number;
+        confidence_rationale?: string;
+      };
+      briefing: AdvisorBriefing | null;
+      evaluation: EvaluationResult | null;
     };
 
 export type Thread = {
