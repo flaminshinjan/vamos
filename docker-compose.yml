@@ -1,0 +1,42 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: vamos-api:latest
+    container_name: vamos-api
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-sonnet-4-6}
+      - ANTHROPIC_EVAL_MODEL=${ANTHROPIC_EVAL_MODEL:-claude-haiku-4-5-20251001}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      - API_CORS_ORIGINS=http://localhost:4247
+      - VAMOS_DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data:ro
+    ports:
+      - "8247:8247"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8247/health').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    image: vamos-web:latest
+    container_name: vamos-web
+    environment:
+      - NEXT_PUBLIC_API_URL=http://api:8247
+      - PORT=4247
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "4247:4247"
+    restart: unless-stopped

@@ -1,0 +1,28 @@
+app = "vamos-web"
+primary_region = "sin"
+
+[build]
+  dockerfile = "apps/web/Dockerfile"
+  [build.args]
+    # Baked into the Next.js bundle at build time.
+    # Override on the command line: `fly deploy --config fly.web.toml \
+    #     --build-arg NEXT_PUBLIC_API_URL=https://vamos-api.fly.dev`
+    NEXT_PUBLIC_API_URL = "https://vamos-api.fly.dev"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "4247"
+  # Read by Next.js server components / API routes at runtime.
+  NEXT_PUBLIC_API_URL = "https://vamos-api.fly.dev"
+
+[http_service]
+  internal_port = 4247
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

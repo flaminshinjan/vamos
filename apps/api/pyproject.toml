@@ -1,0 +1,28 @@
+[project]
+name = "vamos-api"
+version = "0.1.0"
+description = "FastAPI backend for the Vamos financial advisor"
+requires-python = ">=3.11"
+dependencies = [
+    "vamos-core",
+    "vamos-agents",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vamos_api"]
+
+[tool.uv.sources]
+vamos-core = { workspace = true }
+vamos-agents = { workspace = true }
+
+[project.scripts]
+vamos-api = "vamos_api.main:run"
+vamos-cli = "vamos_api.cli:main"
