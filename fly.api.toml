@@ -1,5 +1,5 @@
-app = "vamos-api"
-primary_region = "sin"            # change to nearest region (bom=Mumbai, sin=Singapore, iad=Virginia, etc.)
+app = "vamos-api-shinjan"
+primary_region = "bom"                # Mumbai — closest to NSE data
 kill_signal  = "SIGINT"
 kill_timeout = 5
 
@@ -12,22 +12,27 @@ kill_timeout = 5
   VAMOS_DATA_DIR = "/app/data"
   ANTHROPIC_MODEL = "claude-sonnet-4-6"
   ANTHROPIC_EVAL_MODEL = "claude-haiku-4-5-20251001"
-  # API_CORS_ORIGINS is set as a secret after the web URL is known
+  LANGFUSE_HOST = "https://us.cloud.langfuse.com"
+  # Secrets set in Fly UI / `fly secrets set`:
+  #   ANTHROPIC_API_KEY
+  #   LANGFUSE_PUBLIC_KEY
+  #   LANGFUSE_SECRET_KEY
+  #   API_CORS_ORIGINS  (= https://vamos-web-shinjan.fly.dev once web deploys)
 
 [http_service]
   internal_port = 8247
   force_https = true
-  auto_stop_machines = "stop"      # scale to zero when idle → cheaper
+  auto_stop_machines = "stop"         # scale to zero when idle → cheaper
   auto_start_machines = true
   min_machines_running = 0
   processes = ["app"]
 
   [[http_service.checks]]
-    grace_period  = "10s"
-    interval      = "30s"
-    method        = "GET"
-    timeout       = "5s"
-    path          = "/health"
+    grace_period = "10s"
+    interval     = "30s"
+    method       = "GET"
+    timeout      = "5s"
+    path         = "/health"
 
 [[vm]]
   size = "shared-cpu-1x"

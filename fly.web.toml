@@ -1,19 +1,21 @@
-app = "vamos-web"
-primary_region = "sin"
+app = "vamos-web-shinjan"
+primary_region = "bom"
 
 [build]
   dockerfile = "apps/web/Dockerfile"
   [build.args]
-    # Baked into the Next.js bundle at build time.
-    # Override on the command line: `fly deploy --config fly.web.toml \
-    #     --build-arg NEXT_PUBLIC_API_URL=https://vamos-api.fly.dev`
-    NEXT_PUBLIC_API_URL = "https://vamos-api.fly.dev"
+    # Baked into the Next.js client bundle at build time. Must match the
+    # deployed API app's public URL. If you rename the API app, update both
+    # this line and the API_URL below.
+    NEXT_PUBLIC_API_URL = "https://vamos-api-shinjan.fly.dev"
 
 [env]
   NODE_ENV = "production"
   PORT = "4247"
-  # Read by Next.js server components / API routes at runtime.
-  NEXT_PUBLIC_API_URL = "https://vamos-api.fly.dev"
+  # Runtime env — preferred by lib/api.ts for server-side fetches. Changing
+  # this takes effect on machine restart, no rebuild required.
+  API_URL = "https://vamos-api-shinjan.fly.dev"
+  NEXT_PUBLIC_API_URL = "https://vamos-api-shinjan.fly.dev"
 
 [http_service]
   internal_port = 4247

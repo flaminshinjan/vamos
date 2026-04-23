@@ -1,8 +1,14 @@
 // Typed API client for the Vamos backend.
 // Used only from server components / route handlers (no CORS exposure on client).
 
+// API_URL (runtime, server-side only — no rebuild needed) takes precedence
+// over NEXT_PUBLIC_API_URL (build-time, baked into bundle). The client never
+// hits the backend directly (all calls go through Next route handlers), so
+// runtime resolution is sufficient.
 export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8247";
+  process.env.API_URL ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "http://localhost:8247";
 
 async function get<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
