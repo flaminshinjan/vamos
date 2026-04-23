@@ -1,4 +1,4 @@
-# fly.toml app configuration file generated for vamos-web-shinjan on 2026-04-23T22:21:33Z
+# fly.toml app configuration file for vamos-web-shinjan
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
@@ -16,7 +16,8 @@ primary_region = 'bom'
   API_URL = 'https://vamos-api-shinjan.fly.dev'
   NEXT_PUBLIC_API_URL = 'https://vamos-api-shinjan.fly.dev'
   NODE_ENV = 'production'
-  PORT = '4247'
+  HOSTNAME = '0.0.0.0'
+  PORT = '8080'
 
 [http_service]
   internal_port = 8080

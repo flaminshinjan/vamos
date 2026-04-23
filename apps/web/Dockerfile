@@ -22,17 +22,17 @@ RUN npm run build
 FROM base AS runner
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
-    PORT=4247
-
-RUN addgroup -S app && adduser -S app -G app
+    HOSTNAME=0.0.0.0 \
+    PORT=8080
 
 # Copy what `next start` needs at runtime
-COPY --from=builder --chown=app:app /app/package.json    ./package.json
-COPY --from=builder --chown=app:app /app/node_modules    ./node_modules
-COPY --from=builder --chown=app:app /app/.next           ./.next
-COPY --from=builder --chown=app:app /app/public          ./public
-COPY --from=builder --chown=app:app /app/next.config.js  ./next.config.js
+COPY --from=builder /app/package.json    ./package.json
+COPY --from=builder /app/node_modules    ./node_modules
+COPY --from=builder /app/.next           ./.next
+COPY --from=builder /app/public          ./public
+COPY --from=builder /app/next.config.js  ./next.config.js
 
-USER app
-EXPOSE 4247
-CMD ["node_modules/.bin/next", "start", "-p", "4247"]
+EXPOSE 8080
+# -H binds to 0.0.0.0 so Fly's proxy can reach the process.
+# -p 8080 matches fly.toml internal_port.
+CMD ["node_modules/.bin/next", "start", "-H", "0.0.0.0", "-p", "8080"]
