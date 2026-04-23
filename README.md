@@ -1,9 +1,9 @@
-# Vamos — Autonomous Financial Advisor Agent
+# Aarthik — Autonomous Financial Advisor Agent
 
 An agent that doesn't report data, it **reasons** about it.
 
 Given a user's portfolio, today's market snapshot, and a feed of financial
-news, Vamos produces a concise, causal briefing:
+news, Aarthik produces a concise, causal briefing:
 
 > **"Your portfolio fell 2.73% primarily because the RBI's hawkish stance
 > today hit the banking sector (-2.45%), and 72% of your holdings sit in
