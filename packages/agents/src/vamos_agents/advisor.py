@@ -136,17 +136,53 @@ class AdvisorAgent:
     ) -> Iterator[dict[str, Any]]:
         """Stream the briefing pipeline as Server-Sent-Events-friendly dicts.
 
-        Emitted events (in order):
-            {"event": "analytics", "data": {...}}         — instant
-            {"event": "context",   "data": {...}}         — instant
-            {"event": "start",     "data": {"trace_id": "..."}}
-            {"event": "delta",     "data": {"text": "...", "accumulated": "..."}}
-            {"event": "briefing",  "data": {...}}          — full structured
-            {"event": "evaluation","data": {...}}          — after brief
-            {"event": "done",      "data": {"latency_ms": N, "usage": {...}}}
-            {"event": "error",     "data": {"error": "..."}}
+        Each pipeline stage is wrapped in a paired tool_call event so the UI
+        can render an agent-style reasoning trace ("Ingesting market data" →
+        "Classifying news" → …) in real time.
+
+        Event sequence:
+            tool_call(start)  ingest_market_data
+            tool_call(done)   ingest_market_data
+            tool_call(start)  classify_news
+            tool_call(done)   classify_news
+            tool_call(start)  compute_portfolio_exposure
+            tool_call(done)   compute_portfolio_exposure
+            analytics         { market_trend, portfolio_analytics }
+            context           { ranked_news, holdings_preview }
+            tool_call(start)  identify_causal_links
+            start             { trace_id }
+            delta             { text, accumulated_len }            × N
+            tool_call(done)   identify_causal_links
+            briefing          { full structured AdvisorBriefing }
+            tool_call(start)  self_evaluate_output
+            tool_call(done)   self_evaluate_output
+            evaluation        { score, causal_depth, … }
+            done              { latency_ms, usage, trace_id }
+            error             (anywhere on failure)
         """
         t0 = time.perf_counter()
+
+        def tool_start(tid: str, label: str, detail: str) -> dict[str, Any]:
+            return {
+                "event": "tool_call",
+                "data": {
+                    "id": tid,
+                    "label": label,
+                    "detail": detail,
+                    "status": "active",
+                    "started_at_ms": int((time.perf_counter() - t0) * 1000),
+                },
+            }
+
+        def tool_done(tid: str, started: float) -> dict[str, Any]:
+            return {
+                "event": "tool_call",
+                "data": {
+                    "id": tid,
+                    "status": "done",
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                },
+            }
 
         try:
             portfolio = self.loader.get_portfolio(portfolio_id)
@@ -154,14 +190,38 @@ class AdvisorAgent:
             yield {"event": "error", "data": {"error": str(e), "code": 404}}
             return
 
+        # 1. ingest_market_data
+        ts = time.perf_counter()
+        yield tool_start(
+            "ingest_market_data",
+            "Ingesting market data",
+            "NIFTY 50, SENSEX, sectoral indices",
+        )
         market_snapshot = self.loader.market_snapshot
         news = self.loader.news
         universe = self.loader.sector_universe
+        yield tool_done("ingest_market_data", ts)
 
-        # 1. Analytics (pure, instant) — send immediately so UI has something to render
+        # 2. classify_news
+        ts = time.perf_counter()
+        yield tool_start(
+            "classify_news",
+            "Classifying news",
+            f"{len(news)} headlines → sentiment + scope + entities",
+        )
         market_trend = compute_market_trend(market_snapshot)
-        analytics = compute_portfolio_analytics(portfolio)
         ranked_news = rank_news_for_portfolio(news, portfolio, top_k=top_news)
+        yield tool_done("classify_news", ts)
+
+        # 3. compute_portfolio_exposure
+        ts = time.perf_counter()
+        yield tool_start(
+            "compute_portfolio_exposure",
+            "Computing portfolio exposure",
+            "Sector weights vs. news entities",
+        )
+        analytics = compute_portfolio_analytics(portfolio)
+        yield tool_done("compute_portfolio_exposure", ts)
 
         yield {
             "event": "analytics",
@@ -191,7 +251,7 @@ class AdvisorAgent:
             },
         }
 
-        # 2. Reason — stream deltas
+        # 4. identify_causal_links (the LLM call itself)
         briefing_dict: dict[str, Any] | None = None
         usage: dict[str, int] = {}
         with self.tracer.trace(
@@ -199,6 +259,12 @@ class AdvisorAgent:
             user_id=portfolio.user_id,
             metadata={"portfolio_id": portfolio_id, "streaming": True},
         ) as trace:
+            ts = time.perf_counter()
+            yield tool_start(
+                "identify_causal_links",
+                "Identifying causal links",
+                "High-impact paths only (>0.5)",
+            )
             yield {"event": "start", "data": {"trace_id": trace.trace_id}}
 
             with trace.span("reasoning") as reasoning_span:
@@ -221,9 +287,9 @@ class AdvisorAgent:
                     yield {"event": "error", "data": {"error": str(e), "code": 502}}
                     return
 
+            yield tool_done("identify_causal_links", ts)
             assert briefing_dict is not None
 
-            # 3. Emit the full structured briefing — the UI can now render it
             briefing_partial = AdvisorBriefing(
                 portfolio_id=portfolio_id,
                 user_name=portfolio.user_name,
@@ -245,12 +311,19 @@ class AdvisorAgent:
             )
             yield {"event": "briefing", "data": briefing_partial.model_dump()}
 
-            # 4. Evaluate AFTER the user has the briefing — off the critical path
+            # 5. self_evaluate_output
             if not skip_evaluation:
+                ts = time.perf_counter()
+                yield tool_start(
+                    "self_evaluate_output",
+                    "Self-evaluating output",
+                    "Reasoning quality + coverage + confidence",
+                )
                 with trace.span("evaluation") as eval_span:
                     evaluation = self.evaluator.evaluate(
                         briefing_dict, context, span=eval_span
                     )
+                yield tool_done("self_evaluate_output", ts)
                 yield {"event": "evaluation", "data": evaluation.model_dump()}
 
             latency_ms = int((time.perf_counter() - t0) * 1000)
