@@ -173,6 +173,33 @@ export function Chat({
       push({ id: `u${Date.now()}`, role: "user", text });
       setTyping(true);
 
+      // Small talk / greetings — never hit the LLM
+      if (intent === "chat") {
+        await delay(220);
+        setTyping(false);
+        const firstName = portfolio.user_name.split(" ")[0];
+        const reply = pickGreetingReply(text, firstName);
+        push({ id: `a${Date.now()}t`, role: "agent", kind: "text", text: reply });
+        await delay(80);
+        push({ id: `a${Date.now()}f`, role: "agent", kind: "followups" });
+        return;
+      }
+
+      // Help — explain what the agent can do
+      if (intent === "help") {
+        await delay(220);
+        setTyping(false);
+        push({
+          id: `a${Date.now()}t`,
+          role: "agent",
+          kind: "text",
+          text: `I'm a reasoning-first financial agent. I can:\n\n• Explain why your portfolio moved today (causal chains from news → sector → stock → book)\n• Show today's market snapshot — indices, sector moves, sentiment\n• Analyze concentration risk against the 40% single-sector threshold\n• Classify today's news by sentiment, scope, and impact on your holdings\n• Trace the causal graph behind any move\n\nPick a prompt below or just ask in plain English.`,
+        });
+        await delay(80);
+        push({ id: `a${Date.now()}f`, role: "agent", kind: "followups" });
+        return;
+      }
+
       if (intent === "market") {
         await delay(280);
         setTyping(false);
@@ -940,4 +967,21 @@ function sectorLabel(s: string): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function pickGreetingReply(text: string, firstName: string): string {
+  const t = text.toLowerCase();
+  if (/\b(thanks|thank|ty|thx|cheers)\b/.test(t)) {
+    return `Anytime. Want me to walk you through today's portfolio move, or pull up the market snapshot?`;
+  }
+  if (/\b(bye|goodbye|cya|later)\b/.test(t)) {
+    return `Catch you next session. Your briefing history stays saved — just pick this thread from the left rail to pick up where we left off.`;
+  }
+  if (/\b(ok|okay|cool|nice|great|awesome)\b/.test(t) && t.length < 12) {
+    return `What would you like to look at? I can brief you on today's moves, check concentration risk, or walk through the causal graph for any holding.`;
+  }
+  if (/\bgood\s+(morning|afternoon|evening|night)\b/.test(t)) {
+    return `Hey ${firstName.split(" ")[0]}. Ready when you are — want me to run today's briefing, or start with the market snapshot?`;
+  }
+  return `Hey! I can explain why your portfolio moved today, show the market picture, or flag any concentration risks. What would you like to look at?`;
 }
