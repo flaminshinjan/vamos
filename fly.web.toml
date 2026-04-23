@@ -1,4 +1,4 @@
-# fly.toml app configuration file generated for vamos-web-shinjan
+# fly.toml app configuration file generated for vamos-web-shinjan on 2026-04-23T22:21:33Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
@@ -19,7 +19,7 @@ primary_region = 'bom'
   PORT = '4247'
 
 [http_service]
-  internal_port = 4247
+  internal_port = 8080
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
