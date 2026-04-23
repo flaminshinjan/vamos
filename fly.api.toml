@@ -1,41 +1,42 @@
-app = "vamos-api-shinjan"
-primary_region = "bom"                # Mumbai — closest to NSE data
-kill_signal  = "SIGINT"
-kill_timeout = 5
+# fly.toml app configuration file generated for vamos-api-shinjan on 2026-04-23T21:56:52Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'vamos-api-shinjan'
+primary_region = 'bom'
+kill_signal = 'SIGINT'
+kill_timeout = '5s'
 
 [build]
-  dockerfile = "apps/api/Dockerfile"
+  dockerfile = 'apps/api/Dockerfile'
 
 [env]
-  API_HOST = "0.0.0.0"
-  API_PORT = "8247"
-  VAMOS_DATA_DIR = "/app/data"
-  ANTHROPIC_MODEL = "claude-sonnet-4-6"
-  ANTHROPIC_EVAL_MODEL = "claude-haiku-4-5-20251001"
-  LANGFUSE_HOST = "https://us.cloud.langfuse.com"
-  # Secrets set in Fly UI / `fly secrets set`:
-  #   ANTHROPIC_API_KEY
-  #   LANGFUSE_PUBLIC_KEY
-  #   LANGFUSE_SECRET_KEY
-  #   API_CORS_ORIGINS  (= https://vamos-web-shinjan.fly.dev once web deploys)
+  ANTHROPIC_EVAL_MODEL = 'claude-haiku-4-5-20251001'
+  ANTHROPIC_MODEL = 'claude-sonnet-4-6'
+  API_HOST = '0.0.0.0'
+  API_PORT = '8247'
+  LANGFUSE_HOST = 'https://us.cloud.langfuse.com'
+  VAMOS_DATA_DIR = '/app/data'
 
 [http_service]
   internal_port = 8247
   force_https = true
-  auto_stop_machines = "stop"         # scale to zero when idle → cheaper
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
-  processes = ["app"]
+  processes = ['app']
 
   [[http_service.checks]]
-    grace_period = "10s"
-    interval     = "30s"
-    method       = "GET"
-    timeout      = "5s"
-    path         = "/health"
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/health'
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
-  cpu_kind = "shared"
+  size = 'shared-cpu-1x'
+  memory = '512mb'
+  cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 512
