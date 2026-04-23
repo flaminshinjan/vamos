@@ -1,40 +1,150 @@
 "use client";
 
-import { useState } from "react";
-import { type AdvisorBriefing } from "@/lib/api";
+import { useCallback, useRef, useState } from "react";
+import { type AdvisorBriefing, type EvaluationResult } from "@/lib/api";
 import { formatPct, pnlColor, severityClasses } from "@/lib/format";
+import { tryParsePartial } from "@/lib/partialJson";
+import { readSSE } from "@/lib/sse";
 
-export function BriefingPanel({
-  portfolioId,
-}: {
-  portfolioId: string;
-}) {
+type Phase =
+  | "idle"
+  | "analytics"       // analytics event received
+  | "thinking"        // start event received, waiting for first token
+  | "streaming"       // deltas arriving
+  | "briefing"        // full briefing received
+  | "evaluating"      // waiting for eval
+  | "done"
+  | "error";
+
+type PartialBriefing = {
+  headline?: string;
+  summary?: string;
+  causal_chains?: Array<{
+    trigger?: string;
+    sector?: string;
+    sector_impact_pct?: number;
+    stocks?: string[];
+    portfolio_impact_pct?: number;
+    narrative?: string;
+  }>;
+  key_insights?: Array<{ title?: string; detail?: string; severity?: string }>;
+  conflicts?: Array<{
+    stock_or_sector?: string;
+    news_signal?: string;
+    price_signal?: string;
+    explanation?: string;
+  }>;
+  recommendations?: string[];
+  confidence?: number;
+  confidence_rationale?: string;
+};
+
+export function BriefingPanel({ portfolioId }: { portfolioId: string }) {
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [partial, setPartial] = useState<PartialBriefing>({});
   const [briefing, setBriefing] = useState<AdvisorBriefing | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [evaluation, setEvaluation] = useState<EvaluationResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [stats, setStats] = useState<{
+    firstTokenMs?: number;
+    briefingMs?: number;
+    evalMs?: number;
+    totalMs?: number;
+    usage?: Record<string, number>;
+  }>({});
 
-  async function run() {
-    setLoading(true);
+  const accumulatedRef = useRef("");
+  const startedAtRef = useRef(0);
+
+  const run = useCallback(async () => {
+    // Reset
+    setPhase("analytics");
     setError(null);
+    setPartial({});
     setBriefing(null);
+    setEvaluation(null);
+    setStats({});
+    accumulatedRef.current = "";
+    startedAtRef.current = performance.now();
+    let firstTokenAt = 0;
+
     try {
-      const res = await fetch(`/api/brief`, {
+      const res = await fetch("/api/brief/stream", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ portfolio_id: portfolioId }),
       });
-      if (!res.ok) {
+      if (!res.ok || !res.body) {
         const text = await res.text();
         throw new Error(`${res.status}: ${text.slice(0, 300)}`);
       }
-      const data: AdvisorBriefing = await res.json();
-      setBriefing(data);
+
+      for await (const frame of readSSE(res)) {
+        if (frame.event === "start") {
+          setPhase("thinking");
+        } else if (frame.event === "delta") {
+          if (!firstTokenAt) {
+            firstTokenAt = performance.now();
+            setStats((s) => ({
+              ...s,
+              firstTokenMs: Math.round(firstTokenAt - startedAtRef.current),
+            }));
+          }
+          const d = frame.data as { text: string };
+          accumulatedRef.current += d.text ?? "";
+          const parsed = tryParsePartial<PartialBriefing>(accumulatedRef.current);
+          if (parsed) setPartial(parsed);
+          setPhase("streaming");
+        } else if (frame.event === "briefing") {
+          const b = frame.data as AdvisorBriefing;
+          setBriefing(b);
+          setPartial({
+            headline: b.headline,
+            summary: b.summary,
+            causal_chains: b.causal_chains,
+            key_insights: b.key_insights,
+            conflicts: b.conflicts,
+            recommendations: b.recommendations,
+            confidence: b.confidence,
+            confidence_rationale: b.confidence_rationale,
+          });
+          setStats((s) => ({
+            ...s,
+            briefingMs: Math.round(performance.now() - startedAtRef.current),
+            usage: b.token_usage ?? undefined,
+          }));
+          setPhase("evaluating");
+        } else if (frame.event === "evaluation") {
+          const e = frame.data as EvaluationResult;
+          setEvaluation(e);
+          setStats((s) => ({
+            ...s,
+            evalMs: Math.round(performance.now() - startedAtRef.current),
+          }));
+        } else if (frame.event === "done") {
+          setStats((s) => ({
+            ...s,
+            totalMs: Math.round(performance.now() - startedAtRef.current),
+          }));
+          setPhase("done");
+        } else if (frame.event === "error") {
+          const err = frame.data as { error: string };
+          setError(err.error);
+          setPhase("error");
+          break;
+        }
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
+      setPhase("error");
     }
-  }
+  }, [portfolioId]);
+
+  const busy =
+    phase === "analytics" ||
+    phase === "thinking" ||
+    phase === "streaming" ||
+    phase === "evaluating";
 
   return (
     <section className="card">
@@ -42,15 +152,15 @@ export function BriefingPanel({
         <div>
           <h3 className="text-lg font-semibold">Agent briefing</h3>
           <p className="text-xs text-neutral-500">
-            News → Sector → Stock → Portfolio · Claude Sonnet 4.6 · self-evaluated
+            News → Sector → Stock → Portfolio · Claude Sonnet 4.6 · streamed
           </p>
         </div>
         <button
           onClick={run}
-          disabled={loading}
-          className="rounded-lg bg-accent-blue px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
+          disabled={busy}
+          className="rounded-lg bg-accent-blue px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-60"
         >
-          {loading ? "Reasoning…" : briefing ? "Re-run" : "Generate briefing"}
+          {busy ? "Reasoning…" : briefing ? "Re-run" : "Generate briefing"}
         </button>
       </div>
 
@@ -60,173 +170,314 @@ export function BriefingPanel({
         </div>
       )}
 
-      {loading && !briefing && (
-        <div className="mt-6 space-y-3">
-          <div className="h-4 w-2/3 animate-pulse rounded bg-ink-700" />
-          <div className="h-4 w-1/2 animate-pulse rounded bg-ink-700" />
-          <div className="h-4 w-5/6 animate-pulse rounded bg-ink-700" />
-          <div className="h-24 w-full animate-pulse rounded bg-ink-700" />
-          <div className="text-xs text-neutral-500">
-            Running analytics, ranking news, calling Claude, evaluating…
-          </div>
+      <PhaseIndicator phase={phase} stats={stats} />
+
+      {(phase !== "idle" || briefing) && (
+        <div className="mt-5 space-y-6">
+          {/* Headline + summary (stream in progressively) */}
+          {(partial.headline || partial.summary) && (
+            <div>
+              {partial.headline && (
+                <h4 className="text-xl font-semibold">{partial.headline}</h4>
+              )}
+              {partial.summary && (
+                <p className="mt-2 whitespace-pre-wrap text-neutral-300">
+                  {partial.summary}
+                  {phase === "streaming" && (
+                    <span className="inline-block animate-pulse text-neutral-500">▋</span>
+                  )}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Causal chains */}
+          {partial.causal_chains && partial.causal_chains.length > 0 && (
+            <div>
+              <div className="label mb-2">Causal chains</div>
+              <div className="space-y-3">
+                {partial.causal_chains.map((c, i) => (
+                  <CausalChainRow key={i} chain={c} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Key insights */}
+          {partial.key_insights && partial.key_insights.length > 0 && (
+            <div>
+              <div className="label mb-2">Key insights</div>
+              <div className="space-y-2">
+                {partial.key_insights.map((i, idx) => {
+                  const sev =
+                    (i.severity as "INFO" | "WARN" | "CRITICAL") ?? "INFO";
+                  const cls = severityClasses(sev);
+                  return (
+                    <div
+                      key={idx}
+                      className={`rounded-lg bg-ink-900/60 p-3 ${cls.border}`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className={`pill ${cls.pill}`}>{sev}</span>
+                        {i.title && (
+                          <span className="font-medium text-neutral-100">
+                            {i.title}
+                          </span>
+                        )}
+                      </div>
+                      {i.detail && (
+                        <p className="mt-1 text-sm text-neutral-300">{i.detail}</p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Conflicts */}
+          {partial.conflicts && partial.conflicts.length > 0 && (
+            <div>
+              <div className="label mb-2">Conflicting signals</div>
+              <div className="space-y-2">
+                {partial.conflicts.map((c, i) => (
+                  <div
+                    key={i}
+                    className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm"
+                  >
+                    {c.stock_or_sector && (
+                      <div className="font-medium text-amber-300">
+                        {c.stock_or_sector}
+                      </div>
+                    )}
+                    {c.news_signal && (
+                      <div className="mt-1 text-neutral-400">
+                        news: <span className="text-neutral-200">{c.news_signal}</span>
+                      </div>
+                    )}
+                    {c.price_signal && (
+                      <div className="text-neutral-400">
+                        price:{" "}
+                        <span className="text-neutral-200">{c.price_signal}</span>
+                      </div>
+                    )}
+                    {c.explanation && (
+                      <div className="mt-1 text-neutral-300">→ {c.explanation}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Recommendations */}
+          {partial.recommendations && partial.recommendations.length > 0 && (
+            <div>
+              <div className="label mb-2">Recommendations</div>
+              <ul className="list-inside list-disc space-y-1 text-sm text-neutral-300">
+                {partial.recommendations.map((r, i) => (
+                  <li key={i}>{r}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Confidence + eval */}
+          {(partial.confidence !== undefined || evaluation) && (
+            <div className="grid gap-4 rounded-lg border border-ink-600 bg-ink-900/40 p-4 sm:grid-cols-2">
+              {partial.confidence !== undefined && (
+                <div>
+                  <div className="label">Confidence</div>
+                  <div className="mt-1 flex items-center gap-3">
+                    <div className="text-3xl font-semibold">
+                      {(partial.confidence * 100).toFixed(0)}%
+                    </div>
+                    <div className="h-2 flex-1 overflow-hidden rounded bg-ink-700">
+                      <div
+                        className="h-full bg-accent-blue transition-all"
+                        style={{ width: `${partial.confidence * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                  {partial.confidence_rationale && (
+                    <p className="mt-2 text-xs text-neutral-500">
+                      {partial.confidence_rationale}
+                    </p>
+                  )}
+                </div>
+              )}
+              <div>
+                <div className="label">Self-evaluation</div>
+                {evaluation ? (
+                  <>
+                    <div className="mt-1 flex items-center gap-3">
+                      <div className="text-3xl font-semibold">
+                        {(evaluation.score * 100).toFixed(0)}%
+                      </div>
+                      <span className="pill bg-ink-700 text-neutral-300">
+                        {evaluation.causal_depth}
+                      </span>
+                      <span className="pill bg-ink-700 text-neutral-400">
+                        {evaluation.method}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-xs text-neutral-500">
+                      {evaluation.rationale}
+                    </p>
+                    {evaluation.missing_elements.length > 0 && (
+                      <p className="mt-1 text-xs text-neutral-500">
+                        Missing:{" "}
+                        {evaluation.missing_elements.slice(0, 3).join("; ")}
+                      </p>
+                    )}
+                  </>
+                ) : phase === "evaluating" ? (
+                  <div className="mt-1 flex items-center gap-2 text-sm text-neutral-400">
+                    <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-neutral-500 border-t-transparent" />
+                    Grading briefing…
+                  </div>
+                ) : (
+                  <div className="mt-1 text-sm text-neutral-500">—</div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
-
-      {briefing && <BriefingView briefing={briefing} />}
     </section>
   );
 }
 
-function BriefingView({ briefing }: { briefing: AdvisorBriefing }) {
+function PhaseIndicator({
+  phase,
+  stats,
+}: {
+  phase: Phase;
+  stats: {
+    firstTokenMs?: number;
+    briefingMs?: number;
+    evalMs?: number;
+    totalMs?: number;
+    usage?: Record<string, number>;
+  };
+}) {
+  if (phase === "idle") return null;
+
+  const steps: Array<{ key: Phase; label: string }> = [
+    { key: "analytics", label: "Analytics" },
+    { key: "thinking", label: "Reasoning" },
+    { key: "streaming", label: "Streaming" },
+    { key: "briefing", label: "Briefing" },
+    { key: "evaluating", label: "Eval" },
+    { key: "done", label: "Done" },
+  ];
+  const current = steps.findIndex((s) => s.key === phase);
+
   return (
-    <div className="mt-5 space-y-6">
-      <div>
-        <h4 className="text-xl font-semibold">{briefing.headline}</h4>
-        <p className="mt-2 text-neutral-300">{briefing.summary}</p>
+    <div className="mt-4 rounded-lg border border-ink-600 bg-ink-900/40 px-3 py-2">
+      <div className="flex items-center gap-2 overflow-x-auto text-xs">
+        {steps.map((s, i) => {
+          const active = i === current;
+          const done = i < current || phase === "done";
+          return (
+            <div key={s.key} className="flex items-center gap-2">
+              <span
+                className={`inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] ${
+                  active
+                    ? "bg-accent-blue text-white"
+                    : done
+                      ? "bg-accent-green/30 text-accent-green"
+                      : "bg-ink-700 text-neutral-500"
+                }`}
+              >
+                {done && !active ? "✓" : i + 1}
+              </span>
+              <span
+                className={
+                  active
+                    ? "font-medium text-neutral-100"
+                    : done
+                      ? "text-neutral-400"
+                      : "text-neutral-600"
+                }
+              >
+                {s.label}
+              </span>
+              {i < steps.length - 1 && (
+                <span className="text-neutral-700">›</span>
+              )}
+            </div>
+          );
+        })}
       </div>
-
-      {briefing.causal_chains.length > 0 && (
-        <div>
-          <div className="label mb-2">Causal chains</div>
-          <div className="space-y-3">
-            {briefing.causal_chains.map((c, i) => (
-              <div key={i} className="rounded-lg border border-ink-600 bg-ink-900/60 p-4">
-                <div className="flex flex-wrap items-center gap-2 text-sm">
-                  <span className="text-neutral-200">{c.trigger}</span>
-                  <span className="text-neutral-500">→</span>
-                  <span className="pill bg-accent-blue/15 text-accent-blue">
-                    {c.sector} {formatPct(c.sector_impact_pct)}
-                  </span>
-                  {c.stocks.length > 0 && (
-                    <>
-                      <span className="text-neutral-500">→</span>
-                      <span className="text-neutral-200">{c.stocks.join(", ")}</span>
-                    </>
-                  )}
-                  <span className="text-neutral-500">→</span>
-                  <span className={`font-mono ${pnlColor(c.portfolio_impact_pct)}`}>
-                    portfolio {formatPct(c.portfolio_impact_pct)}
-                  </span>
-                </div>
-                <p className="mt-2 text-sm text-neutral-400">{c.narrative}</p>
-              </div>
-            ))}
-          </div>
+      {(stats.firstTokenMs || stats.briefingMs || stats.totalMs) && (
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-neutral-500">
+          {stats.firstTokenMs && (
+            <span>First token {stats.firstTokenMs}ms</span>
+          )}
+          {stats.briefingMs && <span>· Briefing {stats.briefingMs}ms</span>}
+          {stats.evalMs && <span>· Eval {stats.evalMs}ms</span>}
+          {stats.totalMs && <span>· Total {stats.totalMs}ms</span>}
+          {stats.usage && (
+            <span>
+              · in {stats.usage.input_tokens ?? 0} · out{" "}
+              {stats.usage.output_tokens ?? 0}
+              {stats.usage.cache_read_input_tokens
+                ? ` · cached ${stats.usage.cache_read_input_tokens}`
+                : ""}
+            </span>
+          )}
         </div>
       )}
+    </div>
+  );
+}
 
-      {briefing.key_insights.length > 0 && (
-        <div>
-          <div className="label mb-2">Key insights</div>
-          <div className="space-y-2">
-            {briefing.key_insights.map((i, idx) => {
-              const cls = severityClasses(i.severity);
-              return (
-                <div
-                  key={idx}
-                  className={`rounded-lg bg-ink-900/60 p-3 ${cls.border}`}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className={`pill ${cls.pill}`}>{i.severity}</span>
-                    <span className="font-medium text-neutral-100">{i.title}</span>
-                  </div>
-                  <p className="mt-1 text-sm text-neutral-300">{i.detail}</p>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {briefing.conflicts.length > 0 && (
-        <div>
-          <div className="label mb-2">Conflicting signals</div>
-          <div className="space-y-2">
-            {briefing.conflicts.map((c, i) => (
-              <div key={i} className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
-                <div className="font-medium text-amber-300">{c.stock_or_sector}</div>
-                <div className="mt-1 text-neutral-400">
-                  news: <span className="text-neutral-200">{c.news_signal}</span>
-                </div>
-                <div className="text-neutral-400">
-                  price: <span className="text-neutral-200">{c.price_signal}</span>
-                </div>
-                <div className="mt-1 text-neutral-300">→ {c.explanation}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {briefing.recommendations.length > 0 && (
-        <div>
-          <div className="label mb-2">Recommendations</div>
-          <ul className="list-inside list-disc space-y-1 text-sm text-neutral-300">
-            {briefing.recommendations.map((r, i) => (
-              <li key={i}>{r}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="grid gap-4 rounded-lg border border-ink-600 bg-ink-900/40 p-4 sm:grid-cols-2">
-        <div>
-          <div className="label">Confidence</div>
-          <div className="mt-1 flex items-center gap-3">
-            <div className="text-3xl font-semibold">
-              {(briefing.confidence * 100).toFixed(0)}%
-            </div>
-            <div className="h-2 flex-1 overflow-hidden rounded bg-ink-700">
-              <div
-                className="h-full bg-accent-blue"
-                style={{ width: `${briefing.confidence * 100}%` }}
-              />
-            </div>
-          </div>
-          <p className="mt-2 text-xs text-neutral-500">
-            {briefing.confidence_rationale}
-          </p>
-        </div>
-        {briefing.evaluation && (
-          <div>
-            <div className="label">Self-evaluation</div>
-            <div className="mt-1 flex items-center gap-3">
-              <div className="text-3xl font-semibold">
-                {(briefing.evaluation.score * 100).toFixed(0)}%
-              </div>
-              <span className="pill bg-ink-700 text-neutral-300">
-                {briefing.evaluation.causal_depth}
-              </span>
-              <span className="pill bg-ink-700 text-neutral-400">
-                {briefing.evaluation.method}
-              </span>
-            </div>
-            <p className="mt-2 text-xs text-neutral-500">
-              {briefing.evaluation.rationale}
-            </p>
-            {briefing.evaluation.missing_elements.length > 0 && (
-              <p className="mt-1 text-xs text-neutral-500">
-                Missing: {briefing.evaluation.missing_elements.slice(0, 3).join("; ")}
-              </p>
-            )}
-          </div>
+function CausalChainRow({
+  chain,
+}: {
+  chain: {
+    trigger?: string;
+    sector?: string;
+    sector_impact_pct?: number;
+    stocks?: string[];
+    portfolio_impact_pct?: number;
+    narrative?: string;
+  };
+}) {
+  return (
+    <div className="rounded-lg border border-ink-600 bg-ink-900/60 p-4">
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        {chain.trigger && <span className="text-neutral-200">{chain.trigger}</span>}
+        {chain.sector && (
+          <>
+            <span className="text-neutral-500">→</span>
+            <span className="pill bg-accent-blue/15 text-accent-blue">
+              {chain.sector}
+              {chain.sector_impact_pct !== undefined
+                ? ` ${formatPct(chain.sector_impact_pct)}`
+                : ""}
+            </span>
+          </>
+        )}
+        {chain.stocks && chain.stocks.length > 0 && (
+          <>
+            <span className="text-neutral-500">→</span>
+            <span className="text-neutral-200">{chain.stocks.join(", ")}</span>
+          </>
+        )}
+        {chain.portfolio_impact_pct !== undefined && (
+          <>
+            <span className="text-neutral-500">→</span>
+            <span className={`font-mono ${pnlColor(chain.portfolio_impact_pct)}`}>
+              portfolio {formatPct(chain.portfolio_impact_pct)}
+            </span>
+          </>
         )}
       </div>
-
-      <div className="text-xs text-neutral-500">
-        {briefing.latency_ms && <span>Latency {briefing.latency_ms}ms · </span>}
-        {briefing.token_usage && (
-          <span>
-            Tokens: in {briefing.token_usage.input_tokens ?? 0} · out{" "}
-            {briefing.token_usage.output_tokens ?? 0}
-            {briefing.token_usage.cache_read_input_tokens
-              ? ` · cached ${briefing.token_usage.cache_read_input_tokens}`
-              : ""}{" "}
-            ·{" "}
-          </span>
-        )}
-        {briefing.trace_id && <span>Trace {briefing.trace_id.slice(0, 8)}</span>}
-      </div>
+      {chain.narrative && (
+        <p className="mt-2 text-sm text-neutral-400">{chain.narrative}</p>
+      )}
     </div>
   );
 }

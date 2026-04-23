@@ -253,7 +253,25 @@ unavailable, rules-only is returned with `method="rules_only"`.
 | `GET` | `/portfolios/{id}` | full holdings |
 | `GET` | `/portfolios/{id}/analytics` | recomputed P&L + risk |
 | `GET` | `/portfolios/{id}/relevant-news?top_k=` | ranked news for this portfolio |
-| `POST` | `/advisor/brief` | **full agent briefing** |
+| `POST` | `/advisor/brief` | **full agent briefing** (blocking JSON) |
+| `POST` | `/advisor/brief/stream` | **streamed briefing** via Server-Sent Events |
+
+### `POST /advisor/brief/stream`
+
+Server-Sent Events. Event sequence:
+
+| Event | When | Payload |
+|---|---|---|
+| `analytics` | t=0 (instant) | market trend + portfolio analytics |
+| `context` | t≈0 | top-5 ranked news + holdings preview |
+| `start` | first byte from LLM | trace_id |
+| `delta` | every token | partial tool-input JSON fragment |
+| `briefing` | LLM finished | full structured `AdvisorBriefing` |
+| `evaluation` | grading done | `EvaluationResult` |
+| `done` | end | `latency_ms`, `usage`, `trace_id` |
+| `error` | anywhere | error + HTTP code hint |
+
+The UI renders `analytics` immediately (~30ms), shows the causal briefing as it streams (first token ~1-1.5s), and appends self-eval after the main content is visible. The blocking endpoint below is still available for integrations that want a single JSON blob.
 
 ### `POST /advisor/brief`
 

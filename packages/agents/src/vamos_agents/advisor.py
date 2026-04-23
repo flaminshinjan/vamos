@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any, Iterator
 
 from vamos_core.analytics import (
     compute_market_trend,
@@ -14,7 +15,7 @@ from vamos_core.data_loader import DataLoader
 
 from vamos_agents.context import build_context
 from vamos_agents.evaluator import Evaluator
-from vamos_agents.reasoner import Reasoner, ReasonerError
+from vamos_agents.reasoner import COMPLETE, DELTA, STREAM_START, Reasoner, ReasonerError
 from vamos_agents.schemas import AdvisorBriefing
 from vamos_agents.settings import Settings, get_settings
 from vamos_agents.tracing import get_tracer
@@ -121,3 +122,141 @@ class AdvisorAgent:
             latency_ms=latency_ms,
             token_usage=usage,
         )
+
+    # ------------------------------------------------------------------
+    # Streaming
+    # ------------------------------------------------------------------
+
+    def brief_stream(
+        self,
+        portfolio_id: str,
+        *,
+        top_news: int = 8,
+        skip_evaluation: bool = False,
+    ) -> Iterator[dict[str, Any]]:
+        """Stream the briefing pipeline as Server-Sent-Events-friendly dicts.
+
+        Emitted events (in order):
+            {"event": "analytics", "data": {...}}         — instant
+            {"event": "context",   "data": {...}}         — instant
+            {"event": "start",     "data": {"trace_id": "..."}}
+            {"event": "delta",     "data": {"text": "...", "accumulated": "..."}}
+            {"event": "briefing",  "data": {...}}          — full structured
+            {"event": "evaluation","data": {...}}          — after brief
+            {"event": "done",      "data": {"latency_ms": N, "usage": {...}}}
+            {"event": "error",     "data": {"error": "..."}}
+        """
+        t0 = time.perf_counter()
+
+        try:
+            portfolio = self.loader.get_portfolio(portfolio_id)
+        except KeyError as e:
+            yield {"event": "error", "data": {"error": str(e), "code": 404}}
+            return
+
+        market_snapshot = self.loader.market_snapshot
+        news = self.loader.news
+        universe = self.loader.sector_universe
+
+        # 1. Analytics (pure, instant) — send immediately so UI has something to render
+        market_trend = compute_market_trend(market_snapshot)
+        analytics = compute_portfolio_analytics(portfolio)
+        ranked_news = rank_news_for_portfolio(news, portfolio, top_k=top_news)
+
+        yield {
+            "event": "analytics",
+            "data": {
+                "portfolio_id": portfolio_id,
+                "user_name": portfolio.user_name,
+                "as_of_date": market_snapshot.date,
+                "market_trend": market_trend.model_dump(),
+                "portfolio_analytics": analytics.model_dump(),
+            },
+        }
+
+        context = build_context(
+            portfolio=portfolio,
+            analytics=analytics,
+            ranked_news=ranked_news,
+            market_trend=market_trend,
+            market_snapshot=market_snapshot,
+            sector_universe=universe,
+        )
+
+        yield {
+            "event": "context",
+            "data": {
+                "ranked_news": context["ranked_news"][:5],
+                "holdings_preview": context["holdings_snapshot"][:5],
+            },
+        }
+
+        # 2. Reason — stream deltas
+        briefing_dict: dict[str, Any] | None = None
+        usage: dict[str, int] = {}
+        with self.tracer.trace(
+            "advisor.brief_stream",
+            user_id=portfolio.user_id,
+            metadata={"portfolio_id": portfolio_id, "streaming": True},
+        ) as trace:
+            yield {"event": "start", "data": {"trace_id": trace.trace_id}}
+
+            with trace.span("reasoning") as reasoning_span:
+                try:
+                    for evt in self.reasoner.reason_stream(context, span=reasoning_span):
+                        if evt["kind"] == STREAM_START:
+                            continue
+                        if evt["kind"] == DELTA:
+                            yield {
+                                "event": "delta",
+                                "data": {
+                                    "text": evt["text"],
+                                    "accumulated_len": len(evt["accumulated"]),
+                                },
+                            }
+                        elif evt["kind"] == COMPLETE:
+                            briefing_dict = evt["briefing"]
+                            usage = evt["usage"]
+                except ReasonerError as e:
+                    yield {"event": "error", "data": {"error": str(e), "code": 502}}
+                    return
+
+            assert briefing_dict is not None
+
+            # 3. Emit the full structured briefing — the UI can now render it
+            briefing_partial = AdvisorBriefing(
+                portfolio_id=portfolio_id,
+                user_name=portfolio.user_name,
+                as_of_date=market_snapshot.date,
+                headline=briefing_dict.get("headline", ""),
+                summary=briefing_dict.get("summary", ""),
+                causal_chains=briefing_dict.get("causal_chains", []),
+                key_insights=briefing_dict.get("key_insights", []),
+                conflicts=briefing_dict.get("conflicts", []),
+                recommendations=briefing_dict.get("recommendations", []),
+                confidence=float(briefing_dict.get("confidence", 0.5)),
+                confidence_rationale=briefing_dict.get("confidence_rationale", ""),
+                market_trend=market_trend,
+                portfolio_analytics=analytics,
+                evaluation=None,
+                trace_id=trace.trace_id,
+                latency_ms=int((time.perf_counter() - t0) * 1000),
+                token_usage=usage,
+            )
+            yield {"event": "briefing", "data": briefing_partial.model_dump()}
+
+            # 4. Evaluate AFTER the user has the briefing — off the critical path
+            if not skip_evaluation:
+                with trace.span("evaluation") as eval_span:
+                    evaluation = self.evaluator.evaluate(
+                        briefing_dict, context, span=eval_span
+                    )
+                yield {"event": "evaluation", "data": evaluation.model_dump()}
+
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            trace.update(metadata={"latency_ms": latency_ms})
+
+        yield {
+            "event": "done",
+            "data": {"latency_ms": latency_ms, "usage": usage, "trace_id": trace.trace_id},
+        }
