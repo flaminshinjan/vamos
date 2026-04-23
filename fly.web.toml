@@ -1,30 +1,31 @@
-app = "vamos-web-shinjan"
-primary_region = "bom"
+# fly.toml app configuration file generated for vamos-web-shinjan
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'vamos-web-shinjan'
+primary_region = 'bom'
 
 [build]
-  dockerfile = "apps/web/Dockerfile"
+  dockerfile = 'apps/web/Dockerfile'
+
   [build.args]
-    # Baked into the Next.js client bundle at build time. Must match the
-    # deployed API app's public URL. If you rename the API app, update both
-    # this line and the API_URL below.
-    NEXT_PUBLIC_API_URL = "https://vamos-api-shinjan.fly.dev"
+    NEXT_PUBLIC_API_URL = 'https://vamos-api-shinjan.fly.dev'
 
 [env]
-  NODE_ENV = "production"
-  PORT = "4247"
-  # Runtime env — preferred by lib/api.ts for server-side fetches. Changing
-  # this takes effect on machine restart, no rebuild required.
-  API_URL = "https://vamos-api-shinjan.fly.dev"
-  NEXT_PUBLIC_API_URL = "https://vamos-api-shinjan.fly.dev"
+  API_URL = 'https://vamos-api-shinjan.fly.dev'
+  NEXT_PUBLIC_API_URL = 'https://vamos-api-shinjan.fly.dev'
+  NODE_ENV = 'production'
+  PORT = '4247'
 
 [http_service]
   internal_port = 4247
   force_https = true
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
-  processes = ["app"]
+  processes = ['app']
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = 'shared-cpu-1x'
+  memory = '512mb'
