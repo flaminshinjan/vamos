@@ -62,9 +62,27 @@ class Tracer:
         if not self.enabled:
             yield _NoopTrace(trace_id)
             return
-        lf_trace = self._client.trace(
-            id=trace_id, name=name, user_id=user_id, metadata=metadata or {}
-        )
+        # Defensive: if the installed Langfuse SDK doesn't match our v2
+        # interface (v3+ replaced .trace() with OTel-style spans), fall back
+        # to a no-op instead of crashing the pipeline.
+        try:
+            if not hasattr(self._client, "trace"):
+                logger.warning(
+                    "Langfuse SDK version mismatch: .trace() unavailable; "
+                    "tracing disabled for this run. Pin langfuse<3.0.0 to re-enable."
+                )
+                self.enabled = False
+                yield _NoopTrace(trace_id)
+                return
+            lf_trace = self._client.trace(
+                id=trace_id, name=name, user_id=user_id, metadata=metadata or {}
+            )
+        except Exception as e:
+            logger.warning("Langfuse trace() failed, disabling: %s", e)
+            self.enabled = False
+            yield _NoopTrace(trace_id)
+            return
+
         handle = _LangfuseTrace(trace_id, lf_trace)
         try:
             yield handle
@@ -127,7 +145,7 @@ class _LangfuseSpan(SpanHandle):
                 model=model,
                 input=input,
                 output=output,
-                usage=usage or {},
+                usage=_normalize_usage(usage),
                 metadata=metadata or {},
             )
         except Exception as e:
@@ -167,6 +185,32 @@ class _LangfuseTrace(TraceHandle):
             self._lf.update(**kwargs)
         except Exception as e:
             logger.debug("Langfuse trace update failed: %s", e)
+
+
+def _normalize_usage(usage: dict[str, int] | None) -> dict[str, int]:
+    """Convert Anthropic-style token usage to Langfuse v2's expected shape.
+
+    Anthropic returns {input_tokens, output_tokens, cache_read_input_tokens,
+    cache_creation_input_tokens}. Langfuse v2 accepts either
+    {input, output, total, unit} or {promptTokens, completionTokens, totalTokens}.
+    """
+    if not usage:
+        return {}
+    input_tokens = int(usage.get("input_tokens", usage.get("input", 0)) or 0)
+    output_tokens = int(usage.get("output_tokens", usage.get("output", 0)) or 0)
+    total = input_tokens + output_tokens
+    out: dict[str, int] = {
+        "input": input_tokens,
+        "output": output_tokens,
+        "total": total,
+        "unit": "TOKENS",  # type: ignore[typeddict-item]
+    }
+    # Preserve cache fields as metadata-style extras where supported
+    for k in ("cache_read_input_tokens", "cache_creation_input_tokens"):
+        v = usage.get(k)
+        if v:
+            out[k] = int(v)
+    return out
 
 
 # Module-level singleton

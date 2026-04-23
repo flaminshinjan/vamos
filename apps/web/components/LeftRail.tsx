@@ -1,8 +1,8 @@
 "use client";
 
 import type { PortfolioListItem } from "@/lib/api";
-
-type Thread = { id: string; title: string; when: string };
+import type { Thread } from "@/lib/threads";
+import { formatWhen } from "@/lib/threads";
 
 export function LeftRail({
   portfolios,
@@ -11,6 +11,7 @@ export function LeftRail({
   threads,
   activeThreadId,
   onPickThread,
+  onDeleteThread,
   onNewChat,
   userName = "Rohan Sharma",
   userMeta = "Mock account · INR",
@@ -23,6 +24,7 @@ export function LeftRail({
   threads: Thread[];
   activeThreadId: string | null;
   onPickThread: (id: string) => void;
+  onDeleteThread: (id: string) => void;
   onNewChat: () => void;
   userName?: string;
   userMeta?: string;
@@ -99,18 +101,58 @@ export function LeftRail({
             {threads.length}
           </span>
         </div>
-        {threads.map((t) => (
-          <button
-            key={t.id}
-            className={`rail-item ${activeThreadId === t.id ? "active" : ""}`}
-            onClick={() => onPickThread(t.id)}
+        {threads.length === 0 ? (
+          <div
+            style={{
+              padding: "12px 8px",
+              fontSize: 11.5,
+              color: "var(--ink-4)",
+              lineHeight: 1.5,
+            }}
           >
-            <span className="ri-main">
-              <div className="ri-name">{t.title}</div>
-              <div className="ri-sub">{t.when}</div>
-            </span>
-          </button>
-        ))}
+            No threads yet. Ask a question to start one.
+          </div>
+        ) : (
+          threads.map((t) => (
+            <div
+              key={t.id}
+              className={`rail-item ${activeThreadId === t.id ? "active" : ""}`}
+              style={{ position: "relative" }}
+              onClick={() => onPickThread(t.id)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onPickThread(t.id);
+                }
+              }}
+            >
+              <span className="ri-main">
+                <div className="ri-name">{t.title}</div>
+                <div className="ri-sub">{formatWhen(t.updatedAt)}</div>
+              </span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (confirm(`Delete "${t.title}"?`)) onDeleteThread(t.id);
+                }}
+                title="Delete thread"
+                style={{
+                  opacity: activeThreadId === t.id ? 0.8 : 0.3,
+                  fontSize: 14,
+                  padding: "0 4px",
+                  color: "inherit",
+                  background: "transparent",
+                  border: "none",
+                  cursor: "pointer",
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ))
+        )}
       </div>
 
       <div className="rail-footer">
@@ -127,18 +169,13 @@ export function LeftRail({
         </div>
         <button
           className="tool-btn"
-          title="Toggle theme"
+          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
           onClick={onToggleTheme}
+          aria-label="Toggle theme"
         >
           {theme === "dark" ? (
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-              <circle
-                cx="8"
-                cy="8"
-                r="3"
-                stroke="currentColor"
-                strokeWidth="1.4"
-              />
+              <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.4" />
               <path
                 d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M13 3l-1.4 1.4M4.4 11.6L3 13"
                 stroke="currentColor"

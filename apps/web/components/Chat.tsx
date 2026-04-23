@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AdvisorBriefing,
   EvaluationResult,
@@ -9,8 +9,20 @@ import type {
   PortfolioAnalytics,
   RelevantNews,
 } from "@/lib/api";
+import {
+  copyMarkdown,
+  downloadMarkdown,
+  threadToMarkdown,
+} from "@/lib/export";
 import { FOLLOWUPS, SUGGESTED_PROMPTS, classifyIntent, type Intent } from "@/lib/intent";
 import { readSSE } from "@/lib/sse";
+import {
+  deriveTitle,
+  getThread,
+  saveThread,
+  type SerializedMsg,
+  type Thread,
+} from "@/lib/threads";
 import { BriefingCard } from "@/components/cards/BriefingCard";
 import { CausalGraphCard } from "@/components/cards/CausalGraphCard";
 import { MarketSnapshotCard } from "@/components/cards/MarketSnapshotCard";
@@ -22,36 +34,9 @@ import {
 } from "@/components/cards/ReasoningTraceCard";
 import { RiskCard } from "@/components/cards/RiskCard";
 
-// Message types — the chat's source of truth
-type Msg =
-  | { id: string; role: "user"; text: string }
-  | { id: string; role: "agent"; kind: "text"; text: string }
-  | { id: string; role: "agent"; kind: "followups" }
-  | { id: string; role: "agent"; kind: "market"; trend: MarketTrend }
-  | { id: string; role: "agent"; kind: "news"; news: RelevantNews[] }
-  | { id: string; role: "agent"; kind: "risk"; analytics: PortfolioAnalytics }
-  | {
-      id: string;
-      role: "agent";
-      kind: "reasoning";
-      steps: ToolCallStep[];
-      tokenUsage?: Record<string, number>;
-      totalMs?: number;
-    }
-  | {
-      id: string;
-      role: "agent";
-      kind: "graph";
-      briefing: AdvisorBriefing;
-      news: RelevantNews[];
-    }
-  | {
-      id: string;
-      role: "agent";
-      kind: "briefing";
-      briefing: AdvisorBriefing;
-      evaluation: EvaluationResult | null;
-    };
+type Msg = SerializedMsg;
+
+type Toast = { id: number; text: string; kind: "ok" | "warn" };
 
 export function Chat({
   portfolio,
@@ -59,23 +44,47 @@ export function Chat({
   trend,
   analytics,
   relevantNews,
+  threadId,
+  onThreadsChanged,
+  onThreadSelected,
+  theme,
+  onToggleTheme,
 }: {
   portfolio: Portfolio;
   portfolioId: string;
   trend: MarketTrend;
   analytics: PortfolioAnalytics;
   relevantNews: RelevantNews[];
+  threadId: string | null;
+  onThreadsChanged: () => void;
+  onThreadSelected: (id: string | null) => void;
+  theme: "light" | "dark";
+  onToggleTheme: () => void;
 }) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [typing, setTyping] = useState(false);
   const [input, setInput] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const activeThreadRef = useRef<Thread | null>(null);
 
-  // Reset when portfolio switches
+  // Load messages when the threadId or portfolio changes
   useEffect(() => {
+    if (threadId) {
+      const t = getThread(threadId);
+      if (t && t.portfolioId === portfolioId) {
+        activeThreadRef.current = t;
+        setMessages(t.messages);
+        setTyping(false);
+        return;
+      }
+    }
+    // No thread or mismatched portfolio → empty state (welcome screen)
+    activeThreadRef.current = null;
     setMessages([]);
     setTyping(false);
-  }, [portfolioId]);
+  }, [threadId, portfolioId]);
 
   // Autoscroll on new content
   useEffect(() => {
@@ -84,12 +93,64 @@ export function Chat({
     }
   }, [messages, typing]);
 
-  const push = useCallback((msg: Msg) => {
-    setMessages((m) => [...m, msg]);
+  const toast = useCallback((text: string, kind: "ok" | "warn" = "ok") => {
+    const id = Date.now() + Math.random();
+    setToasts((ts) => [...ts, { id, text, kind }]);
+    setTimeout(() => {
+      setToasts((ts) => ts.filter((t) => t.id !== id));
+    }, 2400);
   }, []);
 
+  // Persist the current message list into the active thread (or create one)
+  const persist = useCallback(
+    (msgs: Msg[]) => {
+      if (msgs.length === 0) return;
+      const now = Date.now();
+      let t = activeThreadRef.current;
+      if (!t) {
+        const firstUser = msgs.find((m) => m.role === "user");
+        if (!firstUser) return;
+        t = {
+          id: `t${now}`,
+          portfolioId,
+          title: deriveTitle((firstUser as { text: string }).text),
+          createdAt: now,
+          updatedAt: now,
+          messages: msgs,
+        };
+        activeThreadRef.current = t;
+        saveThread(t);
+        onThreadSelected(t.id);
+      } else {
+        t.messages = msgs;
+        t.updatedAt = now;
+        saveThread(t);
+      }
+      onThreadsChanged();
+    },
+    [portfolioId, onThreadSelected, onThreadsChanged],
+  );
+
+  const push = useCallback(
+    (msg: Msg) => {
+      setMessages((m) => {
+        const next = [...m, msg];
+        // Persist on user messages and on every terminal agent message; skip
+        // mid-stream updates (reasoning-only) to avoid thrashing localStorage.
+        if (msg.role === "user" || (msg.role === "agent" && msg.kind !== "reasoning")) {
+          persist(next);
+        }
+        return next;
+      });
+    },
+    [persist],
+  );
+
   const updateReasoning = useCallback(
-    (msgId: string, mutate: (r: Extract<Msg, { kind: "reasoning" }>) => Extract<Msg, { kind: "reasoning" }>) => {
+    (
+      msgId: string,
+      mutate: (r: Extract<Msg, { kind: "reasoning" }>) => Extract<Msg, { kind: "reasoning" }>,
+    ) => {
       setMessages((m) =>
         m.map((x) =>
           x.id === msgId && x.role === "agent" && x.kind === "reasoning"
@@ -107,7 +168,6 @@ export function Chat({
       push({ id: `u${Date.now()}`, role: "user", text });
       setTyping(true);
 
-      // Lightweight, instant responses for non-LLM intents (~100ms)
       if (intent === "market") {
         await delay(280);
         setTyping(false);
@@ -152,18 +212,13 @@ export function Chat({
           text: `I classified ${relevantNews.length} headlines that matter for your book. Each is tagged by sentiment, scope, and an impact score I use to prioritize signal over noise.`,
         });
         await delay(120);
-        push({
-          id: `a${Date.now()}n`,
-          role: "agent",
-          kind: "news",
-          news: relevantNews,
-        });
+        push({ id: `a${Date.now()}n`, role: "agent", kind: "news", news: relevantNews });
         await delay(80);
         push({ id: `a${Date.now()}f`, role: "agent", kind: "followups" });
         return;
       }
 
-      // briefing + causal → stream the full pipeline
+      // briefing + causal → stream
       await delay(220);
       setTyping(false);
       push({
@@ -184,7 +239,6 @@ export function Chat({
         steps: DEFAULT_STEPS.map((s) => ({ ...s })),
       });
 
-      // Hit the streaming endpoint
       try {
         const res = await fetch("/api/brief/stream", {
           method: "POST",
@@ -225,7 +279,10 @@ export function Chat({
           } else if (frame.event === "evaluation") {
             evaluation = frame.data as EvaluationResult;
           } else if (frame.event === "done") {
-            const d = frame.data as { latency_ms?: number; usage?: Record<string, number> };
+            const d = frame.data as {
+              latency_ms?: number;
+              usage?: Record<string, number>;
+            };
             updateReasoning(reasoningId, (r) => ({
               ...r,
               tokenUsage: d.usage,
@@ -243,23 +300,21 @@ export function Chat({
           }
         }
 
+        // Persist the final reasoning state now that streaming is complete
+        setMessages((curr) => {
+          persist(curr);
+          return curr;
+        });
+
         if (briefing) {
-          if (intent === "causal") {
-            push({
-              id: `a${Date.now()}g`,
-              role: "agent",
-              kind: "graph",
-              briefing,
-              news: relevantNews,
-            });
-          } else {
-            push({
-              id: `a${Date.now()}g`,
-              role: "agent",
-              kind: "graph",
-              briefing,
-              news: relevantNews,
-            });
+          push({
+            id: `a${Date.now()}g`,
+            role: "agent",
+            kind: "graph",
+            briefing,
+            news: relevantNews,
+          });
+          if (intent !== "causal") {
             push({
               id: `a${Date.now()}b`,
               role: "agent",
@@ -281,7 +336,7 @@ export function Chat({
         });
       }
     },
-    [portfolioId, trend, analytics, relevantNews, push, updateReasoning],
+    [portfolioId, trend, analytics, relevantNews, push, updateReasoning, persist],
   );
 
   function submit(e?: React.FormEvent) {
@@ -291,26 +346,199 @@ export function Chat({
     setInput("");
   }
 
+  // ── Share / Export / menu actions ─────────────────────────────────
+  const buildExportDoc = useCallback((): string | null => {
+    const t = activeThreadRef.current;
+    if (!t || t.messages.length === 0) return null;
+    return threadToMarkdown(t, portfolio.user_name);
+  }, [portfolio.user_name]);
+
+  const onShare = useCallback(async () => {
+    const md = buildExportDoc();
+    if (!md) {
+      toast("Nothing to share yet — ask me something first.", "warn");
+      return;
+    }
+    const ok = await copyMarkdown(md);
+    toast(
+      ok ? "Conversation copied to clipboard as markdown." : "Couldn't access clipboard.",
+      ok ? "ok" : "warn",
+    );
+  }, [buildExportDoc, toast]);
+
+  const onExport = useCallback(() => {
+    const md = buildExportDoc();
+    if (!md) {
+      toast("Nothing to export yet.", "warn");
+      return;
+    }
+    const stamp = new Date().toISOString().slice(0, 10);
+    const slug = portfolio.user_name.toLowerCase().replace(/\s+/g, "-");
+    downloadMarkdown(`vamos-briefing-${slug}-${stamp}.md`, md);
+    toast("Briefing downloaded.", "ok");
+  }, [buildExportDoc, portfolio.user_name, toast]);
+
+  const onClearConversation = useCallback(() => {
+    setMessages([]);
+    setTyping(false);
+    activeThreadRef.current = null;
+    onThreadSelected(null);
+    setMenuOpen(false);
+    toast("Conversation cleared.", "ok");
+  }, [onThreadSelected, toast]);
+
+  // Close menu on outside click
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = () => setMenuOpen(false);
+    const timer = setTimeout(() => document.addEventListener("click", close), 0);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("click", close);
+    };
+  }, [menuOpen]);
+
+  const showWelcome = messages.length === 0 && !typing;
+
   return (
     <section className="chat">
       <div className="chat-header">
         <div className="chat-title">
           <span className="dot accent pulse" />
-          <span>Briefing session</span>
+          <span>{activeThreadRef.current?.title ?? "Briefing session"}</span>
           <span className="dim">· {portfolio.user_name}</span>
         </div>
-        <div style={{ display: "flex", gap: 6, fontSize: 12, color: "var(--ink-3)" }}>
-          <button className="tool-btn">Share</button>
-          <button className="tool-btn">Export</button>
-          <button className="tool-btn">⋯</button>
+        <div
+          style={{
+            display: "flex",
+            gap: 6,
+            fontSize: 12,
+            color: "var(--ink-3)",
+            alignItems: "center",
+          }}
+        >
+          <button
+            className="tool-btn"
+            onClick={onToggleTheme}
+            title={theme === "dark" ? "Switch to light" : "Switch to dark"}
+            aria-label="Toggle theme"
+          >
+            {theme === "dark" ? (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.4" />
+                <path
+                  d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M13 3l-1.4 1.4M4.4 11.6L3 13"
+                  stroke="currentColor"
+                  strokeWidth="1.4"
+                  strokeLinecap="round"
+                />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path
+                  d="M13 9.5A5 5 0 018 14a5 5 0 01-3.5-8.5A5 5 0 008 14a5 5 0 005-4.5z"
+                  fill="currentColor"
+                />
+              </svg>
+            )}
+            <span style={{ marginLeft: 4 }}>{theme === "dark" ? "Light" : "Dark"}</span>
+          </button>
+          <button className="tool-btn" onClick={onShare} title="Copy conversation">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+              <circle cx="12" cy="4" r="2" stroke="currentColor" strokeWidth="1.3" />
+              <circle cx="4" cy="8" r="2" stroke="currentColor" strokeWidth="1.3" />
+              <circle cx="12" cy="12" r="2" stroke="currentColor" strokeWidth="1.3" />
+              <path
+                d="M6 7l4-2M6 9l4 2"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+              />
+            </svg>
+            Share
+          </button>
+          <button className="tool-btn" onClick={onExport} title="Download as markdown">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M8 2v9M4.5 7.5L8 11l3.5-3.5"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <path
+                d="M3 13h10"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+              />
+            </svg>
+            Export
+          </button>
+          <div style={{ position: "relative" }}>
+            <button
+              className="tool-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                setMenuOpen((o) => !o);
+              }}
+              aria-label="More actions"
+            >
+              ⋯
+            </button>
+            {menuOpen && (
+              <div
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  right: 0,
+                  marginTop: 6,
+                  minWidth: 180,
+                  background: "var(--bg-elev)",
+                  border: "1px solid var(--line)",
+                  borderRadius: 8,
+                  boxShadow: "var(--shadow-lg)",
+                  padding: 4,
+                  zIndex: 50,
+                }}
+              >
+                <button
+                  className="tool-btn"
+                  style={{ width: "100%", justifyContent: "flex-start" }}
+                  onClick={onClearConversation}
+                >
+                  Clear conversation
+                </button>
+                <button
+                  className="tool-btn"
+                  style={{ width: "100%", justifyContent: "flex-start" }}
+                  onClick={() => {
+                    onShare();
+                    setMenuOpen(false);
+                  }}
+                >
+                  Copy as markdown
+                </button>
+                <button
+                  className="tool-btn"
+                  style={{ width: "100%", justifyContent: "flex-start" }}
+                  onClick={() => {
+                    onExport();
+                    setMenuOpen(false);
+                  }}
+                >
+                  Download .md
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
       <div className="chat-scroll" ref={scrollRef}>
         <div className="chat-inner">
-          {messages.length === 0 && (
-            <Welcome portfolio={portfolio} onPrompt={handlePrompt} />
-          )}
+          {showWelcome && <Welcome portfolio={portfolio} onPrompt={handlePrompt} />}
           {messages.map((m) =>
             m.role === "user" ? (
               <UserMessage key={m.id} text={m.text} />
@@ -337,27 +565,32 @@ export function Chat({
           />
           <div className="composer-foot">
             <div className="composer-tools">
-              <button type="button" className="tool-btn" title="Attach news">
+              <button
+                type="button"
+                className="tool-btn"
+                onClick={onClearConversation}
+                title="Start a fresh thread"
+              >
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
                   <path
-                    d="M10 3.5v5a2 2 0 01-4 0V4a1.5 1.5 0 013 0v4.5"
+                    d="M8 3v10M3 8h10"
                     stroke="currentColor"
-                    strokeWidth="1.3"
-                  />
-                </svg>
-                Attach
-              </button>
-              <button type="button" className="tool-btn" title="Active portfolio">
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                  <path
-                    d="M3 5l3-3 3 3M13 11l-3 3-3-3"
-                    stroke="currentColor"
-                    strokeWidth="1.3"
+                    strokeWidth="1.4"
                     strokeLinecap="round"
                   />
                 </svg>
-                {portfolio.user_name.split(" ")[0]}
+                New
               </button>
+              <span
+                className="tool-btn"
+                style={{ cursor: "default" }}
+                title="Active portfolio"
+              >
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                  <circle cx="8" cy="8" r="2" fill="currentColor" />
+                </svg>
+                {portfolio.user_name.split(" ")[0]}
+              </span>
             </div>
             <button type="submit" className="send-btn" disabled={!input.trim()}>
               Send
@@ -374,6 +607,8 @@ export function Chat({
           </div>
         </form>
       </div>
+
+      <Toasts toasts={toasts} />
     </section>
   );
 }
@@ -414,8 +649,8 @@ function Welcome({
           maxWidth: 620,
         }}
       >
-        Good evening. Ask me{" "}
-        <em style={{ color: "var(--accent)" }}>why</em>,<br />
+        Good evening. Ask me <em style={{ color: "var(--accent)" }}>why</em>,
+        <br />
         not just <span style={{ color: "var(--ink-3)" }}>how much</span>.
       </h1>
       <p
@@ -514,13 +749,7 @@ function AgentBody({
         totalMs={msg.totalMs}
       />
     );
-  if (msg.kind === "graph") {
-    // Need portfolio here — we don't have it in msg, but it's closed over in Chat
-    // Can't cleanly pass it through; use a context-free alternative — but the
-    // BriefingCard itself embeds the analytics. We show graph with portfolio
-    // passed via closure through a wrapper component below.
-    return <GraphWrapper briefing={msg.briefing} news={msg.news} />;
-  }
+  if (msg.kind === "graph") return <GraphWrapper briefing={msg.briefing} news={msg.news} />;
   if (msg.kind === "briefing")
     return <BriefingCard briefing={msg.briefing} evaluation={msg.evaluation} />;
   if (msg.kind === "followups")
@@ -537,9 +766,6 @@ function AgentBody({
   return null;
 }
 
-// Small wrapper — we need portfolio for the graph. We grab it from the
-// nearest data source via props drilling in the parent. Using a ref to Chat's
-// portfolio prop via React context would be cleaner; keep this simple.
 function GraphWrapper({
   briefing,
   news,
@@ -547,39 +773,81 @@ function GraphWrapper({
   briefing: AdvisorBriefing;
   news: RelevantNews[];
 }) {
-  // Build a minimal portfolio object the graph needs — just held stock symbols
-  const portfolio: Portfolio = {
-    portfolio_id: briefing.portfolio_id,
-    user_name: briefing.user_name,
-    portfolio_type: "",
-    risk_profile: "",
-    investment_horizon: "",
-    description: "",
-    total_investment: 0,
-    current_value: briefing.portfolio_analytics.current_value,
-    overall_gain_loss: 0,
-    overall_gain_loss_percent: 0,
-    holdings: {
-      stocks: briefing.causal_chains.flatMap((c) =>
-        c.stocks.map((s) => ({
-          symbol: s,
-          name: s,
-          sector: c.sector,
-          quantity: 0,
-          current_price: 0,
-          current_value: 0,
-          gain_loss_percent: 0,
-          day_change_percent: c.portfolio_impact_pct,
-          weight_in_portfolio: 0,
-        })),
-      ),
-      mutual_funds: [],
-    },
-  };
+  const portfolio: Portfolio = useMemo(
+    () => ({
+      portfolio_id: briefing.portfolio_id,
+      user_name: briefing.user_name,
+      portfolio_type: "",
+      risk_profile: "",
+      investment_horizon: "",
+      description: "",
+      total_investment: 0,
+      current_value: briefing.portfolio_analytics.current_value,
+      overall_gain_loss: 0,
+      overall_gain_loss_percent: 0,
+      holdings: {
+        stocks: briefing.causal_chains.flatMap((c) =>
+          c.stocks.map((s) => ({
+            symbol: s,
+            name: s,
+            sector: c.sector,
+            quantity: 0,
+            current_price: 0,
+            current_value: 0,
+            gain_loss_percent: 0,
+            day_change_percent: c.portfolio_impact_pct,
+            weight_in_portfolio: 0,
+          })),
+        ),
+        mutual_funds: [],
+      },
+    }),
+    [briefing],
+  );
   return <CausalGraphCard briefing={briefing} portfolio={portfolio} topNews={news} />;
 }
 
-// Helpers
+function Toasts({ toasts }: { toasts: Toast[] }) {
+  if (toasts.length === 0) return null;
+  return (
+    <div
+      style={{
+        position: "fixed",
+        bottom: 32,
+        right: 32,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        zIndex: 100,
+        pointerEvents: "none",
+      }}
+    >
+      {toasts.map((t) => (
+        <div
+          key={t.id}
+          className="fade-up"
+          style={{
+            padding: "10px 14px",
+            background: t.kind === "warn" ? "var(--neg-soft)" : "var(--ink)",
+            color: t.kind === "warn" ? "var(--neg)" : "var(--bg)",
+            border:
+              t.kind === "warn"
+                ? "1px solid var(--neg)"
+                : "1px solid var(--ink-2)",
+            borderRadius: 8,
+            fontSize: 13,
+            fontWeight: 500,
+            boxShadow: "var(--shadow-lg)",
+            maxWidth: 360,
+          }}
+        >
+          {t.text}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function sectorLabel(s: string): string {
   return s
     .replace(/_/g, " ")

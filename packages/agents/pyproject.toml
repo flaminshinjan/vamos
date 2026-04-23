@@ -7,7 +7,7 @@ dependencies = [
     "vamos-core",
     "anthropic>=0.40.0",
     "pydantic>=2.7",
-    "langfuse>=2.50.0",
+    "langfuse>=2.50.0,<3.0.0",
     "python-dotenv>=1.0",
 ]
 
