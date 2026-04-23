@@ -285,11 +285,19 @@ input, textarea { font: inherit; }
 .tool-btn {
   padding: 6px 10px;
   font-size: 12px;
-  color: var(--ink-3);
+  color: var(--ink-2);
   border-radius: 6px;
   display: inline-flex; align-items: center; gap: 6px;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 .tool-btn:hover { background: var(--bg-sunk); color: var(--ink); }
+
+/* Theme toggle needs max contrast against both light + dark backgrounds.
+   Using var(--ink) (ink is always the most-readable foreground in the
+   active palette) + weight on the SVG stroke so the icon pops. */
+.theme-toggle { color: var(--ink); }
+.theme-toggle svg { stroke-width: 1.8; }
+.theme-toggle:hover { background: var(--bg-sunk); }
 .send-btn {
   padding: 7px 14px;
   background: var(--ink); color: var(--bg);

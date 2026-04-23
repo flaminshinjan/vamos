@@ -1,8 +1,8 @@
-"""Advisor endpoint — runs the full agent pipeline.
+"""Advisor endpoints — chat agent + full briefing pipeline.
 
-Two modes:
-    POST /advisor/brief         → single blocking JSON response
-    POST /advisor/brief/stream  → Server-Sent Events stream
+    POST /advisor/chat/stream   → conversational agent (Claude drives)
+    POST /advisor/brief         → single blocking briefing (legacy)
+    POST /advisor/brief/stream  → streamed briefing
 """
 
 from __future__ import annotations
@@ -16,10 +16,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from vamos_agents.advisor import AdvisorAgent
+from vamos_agents.chat_agent import chat_stream
 from vamos_agents.reasoner import ReasonerError
 from vamos_agents.schemas import AdvisorBriefing
+from vamos_agents.settings import get_settings
+from vamos_core import DataLoader
 
-from vamos_api.core.deps import get_advisor
+from vamos_api.core.deps import get_advisor, get_data_loader
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/advisor", tags=["advisor"])
@@ -85,6 +88,56 @@ def brief_stream(
         headers={
             "Cache-Control": "no-cache, no-transform",
             "X-Accel-Buffering": "no",  # disable nginx/proxy buffering
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# ── Chat agent endpoint — every user message goes through Claude ────
+
+class ChatMessage(BaseModel):
+    role: str  # "user" | "assistant"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    portfolio_id: str
+    message: str
+    history: list[ChatMessage] = Field(default_factory=list)
+
+
+@router.post("/chat/stream")
+def chat_stream_endpoint(
+    req: ChatRequest,
+    advisor: AdvisorAgent = Depends(get_advisor),
+    loader: DataLoader = Depends(get_data_loader),
+) -> StreamingResponse:
+    """Conversational agent. Claude decides whether to reply with text,
+    render a data card, or trigger the full briefing pipeline.
+    """
+
+    def generate() -> Iterator[bytes]:
+        try:
+            history = [m.model_dump() for m in req.history]
+            for event in chat_stream(
+                loader=loader,
+                portfolio_id=req.portfolio_id,
+                user_message=req.message,
+                history=history,
+                settings=get_settings(),
+                advisor=advisor,
+            ):
+                yield _format_sse(event["event"], event.get("data", {}))
+        except Exception as e:
+            logger.exception("Chat stream crashed")
+            yield _format_sse("error", {"error": str(e), "code": 500})
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
         },
     )

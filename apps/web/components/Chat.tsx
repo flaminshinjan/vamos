@@ -14,7 +14,7 @@ import {
   downloadMarkdown,
   threadToMarkdown,
 } from "@/lib/export";
-import { FOLLOWUPS, SUGGESTED_PROMPTS, classifyIntent, type Intent } from "@/lib/intent";
+import { SUGGESTED_PROMPTS, type Intent } from "@/lib/intent";
 import { tryParsePartial } from "@/lib/partialJson";
 import { readSSE } from "@/lib/sse";
 import {
@@ -70,7 +70,7 @@ export function Chat({
   const scrollRef = useRef<HTMLDivElement>(null);
   const activeThreadRef = useRef<Thread | null>(null);
 
-  // Load messages when the threadId or portfolio changes
+  // Load messages when thread or portfolio changes
   useEffect(() => {
     if (threadId) {
       const t = getThread(threadId);
@@ -81,28 +81,21 @@ export function Chat({
         return;
       }
     }
-    // No thread or mismatched portfolio → empty state (welcome screen)
     activeThreadRef.current = null;
     setMessages([]);
     setTyping(false);
   }, [threadId, portfolioId]);
 
-  // Autoscroll on new content
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, typing]);
 
   const toast = useCallback((text: string, kind: "ok" | "warn" = "ok") => {
     const id = Date.now() + Math.random();
     setToasts((ts) => [...ts, { id, text, kind }]);
-    setTimeout(() => {
-      setToasts((ts) => ts.filter((t) => t.id !== id));
-    }, 2400);
+    setTimeout(() => setToasts((ts) => ts.filter((t) => t.id !== id)), 2400);
   }, []);
 
-  // Persist the current message list into the active thread (or create one)
   const persist = useCallback(
     (msgs: Msg[]) => {
       if (msgs.length === 0) return;
@@ -136,199 +129,184 @@ export function Chat({
     (msg: Msg) => {
       setMessages((m) => {
         const next = [...m, msg];
-        // Persist on user messages and stable agent messages. Skip mid-stream
-        // kinds (reasoning + streaming_briefing) to avoid thrashing
-        // localStorage on every token; they'll be persisted on completion.
         const isMidStream =
           msg.role === "agent" &&
-          (msg.kind === "reasoning" || msg.kind === "streaming_briefing");
-        if (!isMidStream) {
-          persist(next);
-        }
+          (msg.kind === "reasoning" ||
+            msg.kind === "streaming_briefing" ||
+            msg.kind === "text");
+        // Stream-text messages get persisted when they finish (via finalizeText),
+        // not on every token.
+        if (!isMidStream) persist(next);
         return next;
       });
     },
     [persist],
   );
 
-  const updateReasoning = useCallback(
-    (
-      msgId: string,
-      mutate: (r: Extract<Msg, { kind: "reasoning" }>) => Extract<Msg, { kind: "reasoning" }>,
+  type AgentMsg = Extract<Msg, { role: "agent" }>;
+  type AgentKind = AgentMsg["kind"];
+
+  const updateById = useCallback(
+    <K extends AgentKind>(
+      id: string,
+      kind: K,
+      mutate: (m: Extract<AgentMsg, { kind: K }>) => Extract<AgentMsg, { kind: K }>,
     ) => {
-      setMessages((m) =>
-        m.map((x) =>
-          x.id === msgId && x.role === "agent" && x.kind === "reasoning"
-            ? mutate(x)
-            : x,
-        ),
+      setMessages((ms) =>
+        ms.map((x) => {
+          if (x.id !== id || x.role !== "agent") return x;
+          if ((x as AgentMsg).kind !== kind) return x;
+          return mutate(x as Extract<AgentMsg, { kind: K }>) as Msg;
+        }),
       );
     },
     [],
   );
 
+  const appendText = useCallback((id: string, chunk: string) => {
+    setMessages((ms) =>
+      ms.map((x) =>
+        x.id === id && x.role === "agent" && x.kind === "text"
+          ? { ...x, text: x.text + chunk }
+          : x,
+      ),
+    );
+  }, []);
+
   const handlePrompt = useCallback(
-    async (text: string, explicitIntent?: Intent) => {
-      const intent = explicitIntent ?? classifyIntent(text);
-      push({ id: `u${Date.now()}`, role: "user", text });
+    async (userText: string, _intent?: Intent) => {
+      push({ id: `u${Date.now()}`, role: "user", text: userText });
       setTyping(true);
 
-      // Small talk / greetings — never hit the LLM
-      if (intent === "chat") {
-        await delay(220);
-        setTyping(false);
-        const firstName = portfolio.user_name.split(" ")[0];
-        const reply = pickGreetingReply(text, firstName);
-        push({ id: `a${Date.now()}t`, role: "agent", kind: "text", text: reply });
-        await delay(80);
-        push({ id: `a${Date.now()}f`, role: "agent", kind: "followups" });
-        return;
-      }
+      // Single streaming text bubble for Claude's reply
+      const replyId = `a${Date.now()}-reply`;
+      let replyStarted = false;
 
-      // Help — explain what the agent can do
-      if (intent === "help") {
-        await delay(220);
-        setTyping(false);
-        push({
-          id: `a${Date.now()}t`,
-          role: "agent",
-          kind: "text",
-          text: `I'm a reasoning-first financial agent. I can:\n\n• Explain why your portfolio moved today (causal chains from news → sector → stock → book)\n• Show today's market snapshot — indices, sector moves, sentiment\n• Analyze concentration risk against the 40% single-sector threshold\n• Classify today's news by sentiment, scope, and impact on your holdings\n• Trace the causal graph behind any move\n\nPick a prompt below or just ask in plain English.`,
-        });
-        await delay(80);
-        push({ id: `a${Date.now()}f`, role: "agent", kind: "followups" });
-        return;
-      }
+      // Reasoning card for briefing pipeline (pushed if produce_briefing fires)
+      const reasoningId = `a${Date.now()}-reasoning`;
+      let reasoningPushed = false;
 
-      if (intent === "market") {
-        await delay(280);
-        setTyping(false);
-        push({
-          id: `a${Date.now()}t`,
-          role: "agent",
-          kind: "text",
-          text: `Here's today's market picture. ${trend.advancing_sectors} sectors advanced and ${trend.declining_sectors} declined — the tone is ${trend.overall_sentiment.toLowerCase()}.`,
-        });
-        await delay(120);
-        push({ id: `a${Date.now()}c`, role: "agent", kind: "market", trend });
-        await delay(80);
-        push({ id: `a${Date.now()}f`, role: "agent", kind: "followups" });
-        return;
-      }
-
-      if (intent === "risk") {
-        await delay(280);
-        setTyping(false);
-        const topSector = Object.entries(analytics.sector_allocation)
-          .filter(([k]) => k !== "DIVERSIFIED_MF")
-          .sort(([, a], [, b]) => b - a)[0];
-        const [name, weight] = topSector ?? ["—", 0];
-        const msg = analytics.concentration_risk
-          ? `I've flagged a concentration risk. ${sectorLabel(name)} accounts for ${weight.toFixed(1)}% of your book — above the 40% threshold.`
-          : `Your portfolio looks well balanced. The largest sector (${sectorLabel(name)}) sits at ${weight.toFixed(1)}%, comfortably below the 40% concentration threshold.`;
-        push({ id: `a${Date.now()}t`, role: "agent", kind: "text", text: msg });
-        await delay(120);
-        push({ id: `a${Date.now()}r`, role: "agent", kind: "risk", analytics });
-        await delay(80);
-        push({ id: `a${Date.now()}f`, role: "agent", kind: "followups" });
-        return;
-      }
-
-      if (intent === "news") {
-        await delay(280);
-        setTyping(false);
-        push({
-          id: `a${Date.now()}t`,
-          role: "agent",
-          kind: "text",
-          text: `I classified ${relevantNews.length} headlines that matter for your book. Each is tagged by sentiment, scope, and an impact score I use to prioritize signal over noise.`,
-        });
-        await delay(120);
-        push({ id: `a${Date.now()}n`, role: "agent", kind: "news", news: relevantNews });
-        await delay(80);
-        push({ id: `a${Date.now()}f`, role: "agent", kind: "followups" });
-        return;
-      }
-
-      // briefing + causal → stream
-      await delay(220);
-      setTyping(false);
-      push({
-        id: `a${Date.now()}t`,
-        role: "agent",
-        kind: "text",
-        text:
-          intent === "causal"
-            ? "Let me trace the causal chain. I'll only show paths above impact 0.50."
-            : "Let me reason through this. I'll pull market context, classify today's news, link it to your holdings, and grade my own output.",
-      });
-
-      const reasoningId = `a${Date.now()}-reason`;
-      push({
-        id: reasoningId,
-        role: "agent",
-        kind: "reasoning",
-        steps: DEFAULT_STEPS.map((s) => ({ ...s })),
-      });
-
-      // For briefing intent, a streaming card is pushed immediately when the
-      // LLM starts emitting. For causal intent we only want the graph + trace.
+      // Streaming briefing card
       const briefingId = `a${Date.now()}-brief`;
       let briefingPushed = false;
 
-      const updateStreaming = (
-        mutate: (
-          m: Extract<Msg, { kind: "streaming_briefing" }>,
-        ) => Extract<Msg, { kind: "streaming_briefing" }>,
-      ) => {
-        setMessages((ms) =>
-          ms.map((x) =>
-            x.id === briefingId && x.role === "agent" && x.kind === "streaming_briefing"
-              ? mutate(x)
-              : x,
-          ),
-        );
-      };
+      // Build history from current messages (user + assistant text only)
+      const history = (() => {
+        const out: Array<{ role: string; content: string }> = [];
+        for (const m of messages) {
+          if (m.role === "user") out.push({ role: "user", content: m.text });
+          else if (m.role === "agent" && m.kind === "text") {
+            out.push({ role: "assistant", content: m.text });
+          }
+        }
+        return out;
+      })();
 
       try {
-        const res = await fetch("/api/brief/stream", {
+        const res = await fetch("/api/chat/stream", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             portfolio_id: portfolioId,
-            top_news: 8,
-            skip_evaluation: intent === "causal",
+            message: userText,
+            history,
           }),
         });
         if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
+        const t0 = performance.now();
         let finalBriefing: AdvisorBriefing | null = null;
         let finalEval: EvaluationResult | null = null;
-        const t0 = performance.now();
 
         for await (const frame of readSSE(res)) {
-          if (frame.event === "tool_call") {
+          if (frame.event === "text_delta") {
+            const d = frame.data as { text: string };
+            if (!replyStarted) {
+              replyStarted = true;
+              setTyping(false);
+              push({ id: replyId, role: "agent", kind: "text", text: "" });
+            }
+            appendText(replyId, d.text);
+          } else if (frame.event === "tool_call") {
             const d = frame.data as {
-              id: string;
-              status: "active" | "done";
+              name: string;
+              status?: "active" | "done";
+              id?: string;
               duration_ms?: number;
             };
-            updateReasoning(reasoningId, (r) => ({
-              ...r,
-              steps: r.steps.map((s) =>
-                s.id === d.id
-                  ? {
-                      ...s,
-                      status: d.status === "active" ? "active" : "done",
-                      duration_ms: d.duration_ms ?? s.duration_ms,
-                    }
-                  : s,
-              ),
-            }));
+            // Chat-level tool calls (show_market, etc.) — we emit cards on "done"
+            // Briefing-level tool calls (ingest_market_data, etc.) — we update the reasoning card
+            if (
+              d.name &&
+              [
+                "show_market_snapshot",
+                "show_classified_news",
+                "show_concentration_risk",
+                "produce_briefing",
+              ].includes(d.name)
+            ) {
+              // No UI change needed for chat-level tool calls
+              continue;
+            }
+            // Otherwise it's a briefing pipeline step — update the reasoning card
+            if (!reasoningPushed) {
+              reasoningPushed = true;
+              push({
+                id: reasoningId,
+                role: "agent",
+                kind: "reasoning",
+                steps: DEFAULT_STEPS.map((s) => ({ ...s })),
+              });
+            }
+            if (d.id && d.status) {
+              updateById(reasoningId, "reasoning", (r) => ({
+                ...r,
+                steps: r.steps.map((s) =>
+                  s.id === d.id
+                    ? {
+                        ...s,
+                        status:
+                          d.status === "active" ? "active" : "done",
+                        duration_ms: d.duration_ms ?? s.duration_ms,
+                      }
+                    : s,
+                ),
+              }));
+            }
+          } else if (frame.event === "card") {
+            const d = frame.data as {
+              kind: string;
+              trend?: MarketTrend;
+              news?: RelevantNews[];
+              analytics?: PortfolioAnalytics;
+            };
+            if (d.kind === "market" && d.trend) {
+              push({
+                id: `a${Date.now()}-m`,
+                role: "agent",
+                kind: "market",
+                trend: d.trend,
+              });
+            } else if (d.kind === "news" && d.news) {
+              push({
+                id: `a${Date.now()}-n`,
+                role: "agent",
+                kind: "news",
+                news: d.news,
+              });
+            } else if (d.kind === "risk" && d.analytics) {
+              push({
+                id: `a${Date.now()}-r`,
+                role: "agent",
+                kind: "risk",
+                analytics: d.analytics,
+              });
+            }
+          } else if (frame.event === "briefing_started") {
+            // No-op — reasoning card will appear on first briefing tool_call
           } else if (frame.event === "start") {
-            // LLM has begun emitting tokens — show the streaming card so the
-            // user sees content arrive field-by-field instead of all at once.
-            if (intent !== "causal" && !briefingPushed) {
+            // Briefing LLM started streaming — push the streaming briefing card
+            if (!briefingPushed) {
               briefingPushed = true;
               push({
                 id: briefingId,
@@ -342,7 +320,7 @@ export function Chat({
             }
           } else if (frame.event === "delta") {
             const d = frame.data as { text?: string };
-            if (intent === "causal" || !d.text) continue;
+            if (!d.text) continue;
             if (!briefingPushed) {
               briefingPushed = true;
               push({
@@ -355,7 +333,7 @@ export function Chat({
                 evaluation: null,
               });
             }
-            updateStreaming((m) => {
+            updateById(briefingId, "streaming_briefing", (m) => {
               const nextAcc = m.accumulated + d.text!;
               const parsed =
                 tryParsePartial<typeof m.partial>(nextAcc) ?? m.partial;
@@ -363,42 +341,57 @@ export function Chat({
             });
           } else if (frame.event === "briefing") {
             finalBriefing = frame.data as AdvisorBriefing;
-            if (intent !== "causal") {
-              updateStreaming((m) => ({ ...m, briefing: finalBriefing }));
+            if (briefingPushed) {
+              updateById(briefingId, "streaming_briefing", (m) => ({
+                ...m,
+                briefing: finalBriefing,
+              }));
             }
           } else if (frame.event === "evaluation") {
             finalEval = frame.data as EvaluationResult;
-            if (intent !== "causal") {
-              updateStreaming((m) => ({ ...m, evaluation: finalEval }));
+            if (briefingPushed) {
+              updateById(briefingId, "streaming_briefing", (m) => ({
+                ...m,
+                evaluation: finalEval,
+              }));
             }
           } else if (frame.event === "done") {
             const d = frame.data as {
               latency_ms?: number;
               usage?: Record<string, number>;
             };
-            updateReasoning(reasoningId, (r) => ({
-              ...r,
-              tokenUsage: d.usage,
-              totalMs: d.latency_ms ?? Math.round(performance.now() - t0),
-            }));
+            if (reasoningPushed) {
+              updateById(reasoningId, "reasoning", (r) => ({
+                ...r,
+                tokenUsage: d.usage,
+                totalMs: d.latency_ms ?? Math.round(performance.now() - t0),
+              }));
+            }
           } else if (frame.event === "error") {
             const e = frame.data as { error: string };
-            push({
-              id: `a${Date.now()}e`,
-              role: "agent",
-              kind: "text",
-              text: `I hit an error: ${e.error}`,
-            });
-            return;
+            if (!replyStarted) {
+              setTyping(false);
+              push({
+                id: `a${Date.now()}-e`,
+                role: "agent",
+                kind: "text",
+                text: `I hit an error: ${e.error}`,
+              });
+            } else {
+              appendText(replyId, `\n\n(error: ${e.error})`);
+            }
+            break;
           }
         }
 
-        // Stream finished. Upgrade the streaming card to the clean final
-        // briefing kind so persistence + export use the canonical shape.
-        if (intent !== "causal" && finalBriefing) {
+        // Upgrade the streaming briefing to a final briefing kind for clean
+        // persistence / export
+        if (briefingPushed && finalBriefing) {
           setMessages((ms) =>
             ms.map((x) =>
-              x.id === briefingId && x.role === "agent" && x.kind === "streaming_briefing"
+              x.id === briefingId &&
+              x.role === "agent" &&
+              x.kind === "streaming_briefing"
                 ? {
                     id: briefingId,
                     role: "agent" as const,
@@ -409,36 +402,43 @@ export function Chat({
                 : x,
             ),
           );
-        }
-
-        if (finalBriefing) {
+          // Add the causal graph after the briefing
           push({
-            id: `a${Date.now()}g`,
+            id: `a${Date.now()}-g`,
             role: "agent",
             kind: "graph",
             briefing: finalBriefing,
             news: relevantNews,
           });
-          push({ id: `a${Date.now()}f`, role: "agent", kind: "followups" });
         }
 
-        // Persist final state
+        setTyping(false);
+        // Final persist
         setMessages((curr) => {
           persist(curr);
           return curr;
         });
       } catch (err) {
+        setTyping(false);
         push({
-          id: `a${Date.now()}e`,
+          id: `a${Date.now()}-e`,
           role: "agent",
           kind: "text",
-          text: `Couldn't reach the reasoner: ${
+          text: `Couldn't reach the agent: ${
             err instanceof Error ? err.message : String(err)
           }`,
         });
       }
     },
-    [portfolioId, trend, analytics, relevantNews, push, updateReasoning, persist],
+    [
+      portfolioId,
+      relevantNews,
+      messages,
+      push,
+      appendText,
+      updateById,
+      persist,
+    ],
   );
 
   function submit(e?: React.FormEvent) {
@@ -448,7 +448,7 @@ export function Chat({
     setInput("");
   }
 
-  // ── Share / Export / menu actions ─────────────────────────────────
+  // ── Share / Export / menu ─────────────────────────────────────────
   const buildExportDoc = useCallback((): string | null => {
     const t = activeThreadRef.current;
     if (!t || t.messages.length === 0) return null;
@@ -457,10 +457,7 @@ export function Chat({
 
   const onShare = useCallback(async () => {
     const md = buildExportDoc();
-    if (!md) {
-      toast("Nothing to share yet — ask me something first.", "warn");
-      return;
-    }
+    if (!md) return toast("Nothing to share yet — ask me something first.", "warn");
     const ok = await copyMarkdown(md);
     toast(
       ok ? "Conversation copied to clipboard as markdown." : "Couldn't access clipboard.",
@@ -470,10 +467,7 @@ export function Chat({
 
   const onExport = useCallback(() => {
     const md = buildExportDoc();
-    if (!md) {
-      toast("Nothing to export yet.", "warn");
-      return;
-    }
+    if (!md) return toast("Nothing to export yet.", "warn");
     const stamp = new Date().toISOString().slice(0, 10);
     const slug = portfolio.user_name.toLowerCase().replace(/\s+/g, "-");
     downloadMarkdown(`vamos-briefing-${slug}-${stamp}.md`, md);
@@ -489,13 +483,12 @@ export function Chat({
     toast("Conversation cleared.", "ok");
   }, [onThreadSelected, toast]);
 
-  // Close menu on outside click
   useEffect(() => {
     if (!menuOpen) return;
     const close = () => setMenuOpen(false);
-    const timer = setTimeout(() => document.addEventListener("click", close), 0);
+    const t = setTimeout(() => document.addEventListener("click", close), 0);
     return () => {
-      clearTimeout(timer);
+      clearTimeout(t);
       document.removeEventListener("click", close);
     };
   }, [menuOpen]);
@@ -520,18 +513,18 @@ export function Chat({
           }}
         >
           <button
-            className="tool-btn"
+            className="tool-btn theme-toggle"
             onClick={onToggleTheme}
             title={theme === "dark" ? "Switch to light" : "Switch to dark"}
             aria-label="Toggle theme"
           >
             {theme === "dark" ? (
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.4" />
+                <circle cx="8" cy="8" r="3" stroke="currentColor" strokeWidth="1.6" />
                 <path
                   d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M13 3l-1.4 1.4M4.4 11.6L3 13"
                   stroke="currentColor"
-                  strokeWidth="1.4"
+                  strokeWidth="1.6"
                   strokeLinecap="round"
                 />
               </svg>
@@ -547,13 +540,13 @@ export function Chat({
           </button>
           <button className="tool-btn" onClick={onShare} title="Copy conversation">
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <circle cx="12" cy="4" r="2" stroke="currentColor" strokeWidth="1.3" />
-              <circle cx="4" cy="8" r="2" stroke="currentColor" strokeWidth="1.3" />
-              <circle cx="12" cy="12" r="2" stroke="currentColor" strokeWidth="1.3" />
+              <circle cx="12" cy="4" r="2" stroke="currentColor" strokeWidth="1.4" />
+              <circle cx="4" cy="8" r="2" stroke="currentColor" strokeWidth="1.4" />
+              <circle cx="12" cy="12" r="2" stroke="currentColor" strokeWidth="1.4" />
               <path
                 d="M6 7l4-2M6 9l4 2"
                 stroke="currentColor"
-                strokeWidth="1.3"
+                strokeWidth="1.4"
                 strokeLinecap="round"
               />
             </svg>
@@ -564,14 +557,14 @@ export function Chat({
               <path
                 d="M8 2v9M4.5 7.5L8 11l3.5-3.5"
                 stroke="currentColor"
-                strokeWidth="1.3"
+                strokeWidth="1.4"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
               <path
                 d="M3 13h10"
                 stroke="currentColor"
-                strokeWidth="1.3"
+                strokeWidth="1.4"
                 strokeLinecap="round"
               />
             </svg>
@@ -834,12 +827,16 @@ function TypingMessage() {
 
 function AgentBody({
   msg,
-  onPrompt,
 }: {
   msg: Extract<Msg, { role: "agent" }>;
   onPrompt: (text: string, intent?: Intent) => void;
 }) {
-  if (msg.kind === "text") return <p>{msg.text}</p>;
+  if (msg.kind === "text")
+    return (
+      <p style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+        {msg.text}
+      </p>
+    );
   if (msg.kind === "market") return <MarketSnapshotCard trend={msg.trend} />;
   if (msg.kind === "news") return <NewsCard news={msg.news} />;
   if (msg.kind === "risk") return <RiskCard analytics={msg.analytics} />;
@@ -855,24 +852,11 @@ function AgentBody({
   if (msg.kind === "briefing")
     return <BriefingCard briefing={msg.briefing} evaluation={msg.evaluation} />;
   if (msg.kind === "streaming_briefing") {
-    // If the final briefing already arrived (stream completed), render the
-    // full card with evaluation. Otherwise show the partial data as it grows.
     if (msg.briefing) {
       return <BriefingCard briefing={msg.briefing} evaluation={msg.evaluation} />;
     }
     return <BriefingCard briefing={msg.partial} evaluation={null} streaming />;
   }
-  if (msg.kind === "followups")
-    return (
-      <div className="chips" style={{ marginTop: 4 }}>
-        {FOLLOWUPS.map((f, i) => (
-          <button key={i} className="chip" onClick={() => onPrompt(f.text, f.intent)}>
-            <span className="mono">→</span>
-            {f.text}
-          </button>
-        ))}
-      </div>
-    );
   return null;
 }
 
@@ -956,32 +940,4 @@ function Toasts({ toasts }: { toasts: Toast[] }) {
       ))}
     </div>
   );
-}
-
-function sectorLabel(s: string): string {
-  return s
-    .replace(/_/g, " ")
-    .toLowerCase()
-    .replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function pickGreetingReply(text: string, firstName: string): string {
-  const t = text.toLowerCase();
-  if (/\b(thanks|thank|ty|thx|cheers)\b/.test(t)) {
-    return `Anytime. Want me to walk you through today's portfolio move, or pull up the market snapshot?`;
-  }
-  if (/\b(bye|goodbye|cya|later)\b/.test(t)) {
-    return `Catch you next session. Your briefing history stays saved — just pick this thread from the left rail to pick up where we left off.`;
-  }
-  if (/\b(ok|okay|cool|nice|great|awesome)\b/.test(t) && t.length < 12) {
-    return `What would you like to look at? I can brief you on today's moves, check concentration risk, or walk through the causal graph for any holding.`;
-  }
-  if (/\bgood\s+(morning|afternoon|evening|night)\b/.test(t)) {
-    return `Hey ${firstName.split(" ")[0]}. Ready when you are — want me to run today's briefing, or start with the market snapshot?`;
-  }
-  return `Hey! I can explain why your portfolio moved today, show the market picture, or flag any concentration risks. What would you like to look at?`;
 }

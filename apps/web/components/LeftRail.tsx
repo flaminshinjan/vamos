@@ -168,7 +168,7 @@ export function LeftRail({
           <div style={{ fontSize: 11, color: "var(--ink-3)" }}>{userMeta}</div>
         </div>
         <button
-          className="tool-btn"
+          className="tool-btn theme-toggle"
           title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
           onClick={onToggleTheme}
           aria-label="Toggle theme"
