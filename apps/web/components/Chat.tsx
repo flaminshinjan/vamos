@@ -4,10 +4,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AdvisorBriefing,
   EvaluationResult,
+  HoldingsPayload,
+  MarketForecast,
   MarketTrend,
   Portfolio,
   PortfolioAnalytics,
   RelevantNews,
+  SectorPerformancePayload,
+  StockDiagnosis,
+  StockQuote,
+  TrendScanPayload,
 } from "@/lib/api";
 import {
   copyMarkdown,
@@ -26,6 +32,8 @@ import {
 } from "@/lib/threads";
 import { BriefingCard } from "@/components/cards/BriefingCard";
 import { CausalGraphCard } from "@/components/cards/CausalGraphCard";
+import { ForecastCard } from "@/components/cards/ForecastCard";
+import { HoldingsCard } from "@/components/cards/HoldingsCard";
 import { MarketSnapshotCard } from "@/components/cards/MarketSnapshotCard";
 import { NewsCard } from "@/components/cards/NewsCard";
 import {
@@ -34,6 +42,10 @@ import {
   type ToolCallStep,
 } from "@/components/cards/ReasoningTraceCard";
 import { RiskCard } from "@/components/cards/RiskCard";
+import { SectorPerformanceCard } from "@/components/cards/SectorPerformanceCard";
+import { StockCard } from "@/components/cards/StockCard";
+import { StockDiagnosisCard } from "@/components/cards/StockDiagnosisCard";
+import { TrendScanCard } from "@/components/cards/TrendScanCard";
 
 type Msg = SerializedMsg;
 
@@ -182,9 +194,12 @@ export function Chat({
       const replyId = `a${Date.now()}-reply`;
       let replyStarted = false;
 
-      // Reasoning card for briefing pipeline (pushed if produce_briefing fires)
+      // Reasoning card — populated by workflow tool_call events. Seeded with
+      // DEFAULT_STEPS only when produce_briefing is the active chat tool, so
+      // the briefing pipeline shows its 5-step preview up front.
       const reasoningId = `a${Date.now()}-reasoning`;
       let reasoningPushed = false;
+      let activeChatTool: string | null = null;
 
       // Streaming briefing card
       const briefingId = `a${Date.now()}-brief`;
@@ -229,49 +244,68 @@ export function Chat({
             appendText(replyId, d.text);
           } else if (frame.event === "tool_call") {
             const d = frame.data as {
-              name: string;
+              name?: string;
+              label?: string;
+              detail?: string;
               status?: "active" | "done";
               id?: string;
               duration_ms?: number;
             };
-            // Chat-level tool calls (show_market, etc.) — we emit cards on "done"
-            // Briefing-level tool calls (ingest_market_data, etc.) — we update the reasoning card
-            if (
-              d.name &&
-              [
-                "show_market_snapshot",
-                "show_classified_news",
-                "show_concentration_risk",
-                "produce_briefing",
-              ].includes(d.name)
-            ) {
-              // No UI change needed for chat-level tool calls
+
+            // Chat-level events carry `name` (the tool Claude picked).
+            // Workflow steps carry `label` + `detail` instead.
+            if (d.name) {
+              if (d.status === "active") activeChatTool = d.name;
               continue;
             }
-            // Otherwise it's a briefing pipeline step — update the reasoning card
+            // Workflow step → populate the reasoning card.
             if (!reasoningPushed) {
               reasoningPushed = true;
+              const seed: ToolCallStep[] =
+                activeChatTool === "produce_briefing"
+                  ? DEFAULT_STEPS.map((s) => ({ ...s }))
+                  : [];
               push({
                 id: reasoningId,
                 role: "agent",
                 kind: "reasoning",
-                steps: DEFAULT_STEPS.map((s) => ({ ...s })),
+                steps: seed,
               });
             }
             if (d.id && d.status) {
-              updateById(reasoningId, "reasoning", (r) => ({
-                ...r,
-                steps: r.steps.map((s) =>
-                  s.id === d.id
-                    ? {
-                        ...s,
-                        status:
-                          d.status === "active" ? "active" : "done",
-                        duration_ms: d.duration_ms ?? s.duration_ms,
-                      }
-                    : s,
-                ),
-              }));
+              updateById(reasoningId, "reasoning", (r) => {
+                const idx = r.steps.findIndex((s) => s.id === d.id);
+                const nextStatus = d.status === "active" ? "active" : "done";
+                if (idx === -1) {
+                  return {
+                    ...r,
+                    steps: [
+                      ...r.steps,
+                      {
+                        id: d.id!,
+                        label: d.label ?? d.id!,
+                        detail: d.detail ?? "",
+                        status: nextStatus,
+                        duration_ms: d.duration_ms,
+                      },
+                    ],
+                  };
+                }
+                return {
+                  ...r,
+                  steps: r.steps.map((s, i) =>
+                    i === idx
+                      ? {
+                          ...s,
+                          status: nextStatus,
+                          label: d.label ?? s.label,
+                          detail: d.detail ?? s.detail,
+                          duration_ms: d.duration_ms ?? s.duration_ms,
+                        }
+                      : s,
+                  ),
+                };
+              });
             }
           } else if (frame.event === "card") {
             const d = frame.data as {
@@ -279,6 +313,16 @@ export function Chat({
               trend?: MarketTrend;
               news?: RelevantNews[];
               analytics?: PortfolioAnalytics;
+              quote?: StockQuote;
+              summary?: string;
+              diagnosis?: StockDiagnosis;
+              forecast?: MarketForecast;
+              sector?: SectorPerformancePayload;
+              scan?: TrendScanPayload;
+              holdings?: HoldingsPayload["holdings"];
+              top_gainer?: HoldingsPayload["top_gainer"];
+              top_loser?: HoldingsPayload["top_loser"];
+              day_change_pct?: number;
             };
             if (d.kind === "market" && d.trend) {
               push({
@@ -300,6 +344,54 @@ export function Chat({
                 role: "agent",
                 kind: "risk",
                 analytics: d.analytics,
+              });
+            } else if (d.kind === "stock" && d.quote) {
+              push({
+                id: `a${Date.now()}-sq`,
+                role: "agent",
+                kind: "stock",
+                quote: d.quote,
+                summary: d.summary,
+              });
+            } else if (d.kind === "stock_diagnosis" && d.diagnosis) {
+              push({
+                id: `a${Date.now()}-sd`,
+                role: "agent",
+                kind: "stock_diagnosis",
+                diagnosis: d.diagnosis,
+              });
+            } else if (d.kind === "forecast" && d.forecast) {
+              push({
+                id: `a${Date.now()}-fc`,
+                role: "agent",
+                kind: "forecast",
+                forecast: d.forecast,
+              });
+            } else if (d.kind === "sector_performance" && d.sector) {
+              push({
+                id: `a${Date.now()}-sp`,
+                role: "agent",
+                kind: "sector_performance",
+                sector: d.sector,
+              });
+            } else if (d.kind === "trend_scan" && d.scan) {
+              push({
+                id: `a${Date.now()}-ts`,
+                role: "agent",
+                kind: "trend_scan",
+                scan: d.scan,
+              });
+            } else if (d.kind === "holdings" && d.holdings) {
+              push({
+                id: `a${Date.now()}-hp`,
+                role: "agent",
+                kind: "holdings",
+                payload: {
+                  holdings: d.holdings,
+                  top_gainer: d.top_gainer ?? null,
+                  top_loser: d.top_loser ?? null,
+                  day_change_pct: d.day_change_pct ?? 0,
+                },
               });
             }
           } else if (frame.event === "briefing_started") {
@@ -840,6 +932,15 @@ function AgentBody({
   if (msg.kind === "market") return <MarketSnapshotCard trend={msg.trend} />;
   if (msg.kind === "news") return <NewsCard news={msg.news} />;
   if (msg.kind === "risk") return <RiskCard analytics={msg.analytics} />;
+  if (msg.kind === "stock")
+    return <StockCard quote={msg.quote} summary={msg.summary} />;
+  if (msg.kind === "stock_diagnosis")
+    return <StockDiagnosisCard diagnosis={msg.diagnosis} />;
+  if (msg.kind === "forecast") return <ForecastCard forecast={msg.forecast} />;
+  if (msg.kind === "sector_performance")
+    return <SectorPerformanceCard sector={msg.sector} />;
+  if (msg.kind === "trend_scan") return <TrendScanCard scan={msg.scan} />;
+  if (msg.kind === "holdings") return <HoldingsCard payload={msg.payload} />;
   if (msg.kind === "reasoning")
     return (
       <ReasoningTraceCard

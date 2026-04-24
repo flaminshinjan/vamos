@@ -19,6 +19,8 @@ class Settings:
     data_dir: Path
     max_output_tokens: int
     request_timeout_s: float
+    serpapi_key: str | None
+    provider_cache_ttl_s: int
 
 
 @lru_cache(maxsize=1)
@@ -33,4 +35,6 @@ def get_settings() -> Settings:
         data_dir=Path(os.getenv("VAMOS_DATA_DIR", "./data")),
         max_output_tokens=int(os.getenv("VAMOS_MAX_TOKENS", "1024")),
         request_timeout_s=float(os.getenv("VAMOS_TIMEOUT_S", "60")),
+        serpapi_key=os.getenv("SERPAPI_KEY") or None,
+        provider_cache_ttl_s=int(os.getenv("VAMOS_PROVIDER_CACHE_TTL_S", "300")),
     )

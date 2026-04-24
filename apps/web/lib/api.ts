@@ -199,6 +199,81 @@ export type RelevantNews = {
   };
 };
 
+// ---------- Chat workflow card payloads ----------
+
+export type StockQuote = {
+  symbol: string;
+  price: number | null;
+  change_pct: number | null;
+  currency?: string | null;
+  title?: string | null;
+};
+
+export type NewsRef = {
+  title: string;
+  url: string;
+  source: string;
+  date: string;
+  snippet: string;
+};
+
+export type StockDiagnosis = {
+  symbol: string;
+  quote: StockQuote;
+  headlines: NewsRef[];
+  reasoning: string;
+  summary: string;
+};
+
+export type HistoricalPoint = { date: string; close: number };
+
+export type MarketForecast = {
+  headline: string;
+  current_summary: string;
+  historical: HistoricalPoint[];
+  momentum_pct_5d: number | null;
+  momentum_pct_20d: number | null;
+  outlook: string;
+  headlines: NewsRef[];
+};
+
+export type SectorPerformancePayload = {
+  sector: string;
+  index_quote: StockQuote | null;
+  headlines: NewsRef[];
+  summary: string;
+};
+
+export type TrendMover = {
+  symbol: string;
+  change_pct_5d: number | null;
+  change_pct_20d: number | null;
+  last_close: number | null;
+};
+
+export type TrendScanPayload = {
+  up_movers: TrendMover[];
+  down_movers: TrendMover[];
+  summary: string;
+};
+
+export type HoldingPerformance = {
+  symbol: string;
+  sector: string;
+  weight_pct: number;
+  day_change_pct: number;
+  day_change_abs: number;
+  overall_gain_pct: number;
+  current_value: number;
+};
+
+export type HoldingsPayload = {
+  holdings: HoldingPerformance[];
+  top_gainer: { symbol: string; change_percent: number } | null;
+  top_loser: { symbol: string; change_percent: number } | null;
+  day_change_pct: number;
+};
+
 // ---------- API ----------
 
 export const api = {

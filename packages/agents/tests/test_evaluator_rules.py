@@ -48,6 +48,8 @@ def _make_evaluator() -> Evaluator:
             data_dir=DATA_DIR,
             max_output_tokens=0,
             request_timeout_s=1.0,
+            serpapi_key=None,
+            provider_cache_ttl_s=0,
         )
     )
 

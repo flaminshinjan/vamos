@@ -7,9 +7,15 @@
 import type {
   AdvisorBriefing,
   EvaluationResult,
+  HoldingsPayload,
+  MarketForecast,
   MarketTrend,
   PortfolioAnalytics,
   RelevantNews,
+  SectorPerformancePayload,
+  StockDiagnosis,
+  StockQuote,
+  TrendScanPayload,
 } from "@/lib/api";
 
 export type SerializedMsg =
@@ -19,6 +25,12 @@ export type SerializedMsg =
   | { id: string; role: "agent"; kind: "market"; trend: MarketTrend }
   | { id: string; role: "agent"; kind: "news"; news: RelevantNews[] }
   | { id: string; role: "agent"; kind: "risk"; analytics: PortfolioAnalytics }
+  | { id: string; role: "agent"; kind: "stock"; quote: StockQuote; summary?: string }
+  | { id: string; role: "agent"; kind: "stock_diagnosis"; diagnosis: StockDiagnosis }
+  | { id: string; role: "agent"; kind: "forecast"; forecast: MarketForecast }
+  | { id: string; role: "agent"; kind: "sector_performance"; sector: SectorPerformancePayload }
+  | { id: string; role: "agent"; kind: "trend_scan"; scan: TrendScanPayload }
+  | { id: string; role: "agent"; kind: "holdings"; payload: HoldingsPayload }
   | {
       id: string;
       role: "agent";
