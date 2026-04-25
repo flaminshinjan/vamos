@@ -15,7 +15,7 @@ from typing import Iterator
 
 from vamos_agents.providers import ProviderError, finance_query
 from vamos_agents.workflows._deps import WorkflowDeps
-from vamos_agents.workflows._events import card, error, tool_done, tool_start
+from vamos_agents.workflows._events import card, note, tool_done, tool_start
 from vamos_agents.workflows.schemas import NewsRef, StockDiagnosis, StockQuote
 
 logger = logging.getLogger(__name__)
@@ -24,10 +24,19 @@ logger = logging.getLogger(__name__)
 def lookup_stock(symbol: str, *, deps: WorkflowDeps) -> Iterator[dict]:
     sym = symbol.upper().strip()
     if not sym:
-        yield error("lookup_stock requires a symbol", code=400)
+        yield note(
+            "I need a stock symbol to look up — try 'how is INFY doing' or "
+            "'price of HDFCBANK'.",
+            tone="neutral",
+        )
         return
     if deps.serp is None:
-        yield error("SERPAPI_KEY not set — stock lookup unavailable", code=503)
+        yield note(
+            f"Live market data isn't connected right now, so I can't pull a "
+            f"fresh quote for {sym}. I can still answer questions about your "
+            "portfolio, today's news, or sector exposure from local data.",
+            tone="neutral",
+        )
         return
 
     ts = time.perf_counter()
@@ -35,11 +44,25 @@ def lookup_stock(symbol: str, *, deps: WorkflowDeps) -> Iterator[dict]:
     try:
         raw = deps.serp.google_finance(finance_query(sym))
     except ProviderError as e:
+        logger.warning("lookup_stock %s failed: %s", sym, e)
         yield tool_done("fetch_quote", ts)
-        yield error(str(e))
+        yield note(
+            f"Couldn't reach the live quote for {sym} just now — the data "
+            "provider is unhappy. Try again in a moment.",
+            tone="negative",
+        )
         return
     quote = StockQuote.from_serpapi_finance(sym, raw)
     yield tool_done("fetch_quote", ts)
+
+    if quote.price is None:
+        yield note(
+            f"I got a response for {sym} but couldn't parse a usable price — "
+            "the symbol may be wrong or unsupported on Google Finance NSE. "
+            "Try the bare ticker (e.g. INFY, HDFCBANK).",
+            tone="negative",
+        )
+        return
 
     ts = time.perf_counter()
     yield tool_start("summarize_quote", "Writing summary", sym)
@@ -52,10 +75,19 @@ def lookup_stock(symbol: str, *, deps: WorkflowDeps) -> Iterator[dict]:
 def diagnose_stock(symbol: str, *, deps: WorkflowDeps) -> Iterator[dict]:
     sym = symbol.upper().strip()
     if not sym:
-        yield error("diagnose_stock requires a symbol", code=400)
+        yield note(
+            "I need a stock symbol to diagnose — try 'why is INFY down' or "
+            "'what happened to HDFCBANK'.",
+            tone="neutral",
+        )
         return
     if deps.serp is None:
-        yield error("SERPAPI_KEY not set — diagnosis unavailable", code=503)
+        yield note(
+            f"Live market data isn't connected, so I can't pull fresh news + "
+            f"price for {sym}. If it's in your portfolio, ask 'why is my "
+            "portfolio moving' and I'll explain from today's local data.",
+            tone="neutral",
+        )
         return
 
     # 1. live quote
@@ -68,8 +100,13 @@ def diagnose_stock(symbol: str, *, deps: WorkflowDeps) -> Iterator[dict]:
     try:
         raw_quote = deps.serp.google_finance(finance_query(sym))
     except ProviderError as e:
+        logger.warning("diagnose_stock quote %s failed: %s", sym, e)
         yield tool_done("check_current_stock_status", ts)
-        yield error(str(e))
+        yield note(
+            f"Couldn't pull a live quote for {sym} just now — the data "
+            "provider isn't responding. Try again in a moment.",
+            tone="negative",
+        )
         return
     quote = StockQuote.from_serpapi_finance(sym, raw_quote)
     yield tool_done("check_current_stock_status", ts)
@@ -80,9 +117,8 @@ def diagnose_stock(symbol: str, *, deps: WorkflowDeps) -> Iterator[dict]:
     try:
         news_raw = deps.serp.search_news(f"{sym} stock NSE India", num=10)
     except ProviderError as e:
-        yield tool_done("stock_status_reasoning", ts)
-        yield error(str(e))
-        return
+        logger.warning("diagnose_stock news %s failed: %s", sym, e)
+        news_raw = []
     headlines = [NewsRef(**n) for n in news_raw]
     reasoning = _haiku_explain(deps, sym, quote, headlines)
     yield tool_done("stock_status_reasoning", ts)

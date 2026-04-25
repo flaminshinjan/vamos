@@ -8,8 +8,11 @@ import type {
   AdvisorBriefing,
   EvaluationResult,
   HoldingsPayload,
+  LiveMarketPayload,
   MarketForecast,
   MarketTrend,
+  MutualFundsPayload,
+  NoteTone,
   PortfolioAnalytics,
   RelevantNews,
   SectorPerformancePayload,
@@ -23,14 +26,47 @@ export type SerializedMsg =
   | { id: string; role: "agent"; kind: "text"; text: string }
   | { id: string; role: "agent"; kind: "followups" }
   | { id: string; role: "agent"; kind: "market"; trend: MarketTrend }
-  | { id: string; role: "agent"; kind: "news"; news: RelevantNews[] }
+  | {
+      id: string;
+      role: "agent";
+      kind: "news";
+      news: RelevantNews[];
+      focus?: "all" | "negative" | "positive" | "neutral";
+      lead?: string;
+    }
   | { id: string; role: "agent"; kind: "risk"; analytics: PortfolioAnalytics }
   | { id: string; role: "agent"; kind: "stock"; quote: StockQuote; summary?: string }
   | { id: string; role: "agent"; kind: "stock_diagnosis"; diagnosis: StockDiagnosis }
   | { id: string; role: "agent"; kind: "forecast"; forecast: MarketForecast }
   | { id: string; role: "agent"; kind: "sector_performance"; sector: SectorPerformancePayload }
   | { id: string; role: "agent"; kind: "trend_scan"; scan: TrendScanPayload }
-  | { id: string; role: "agent"; kind: "holdings"; payload: HoldingsPayload }
+  | {
+      id: string;
+      role: "agent";
+      kind: "holdings";
+      payload: HoldingsPayload;
+      focus?: "all" | "losers" | "gainers";
+      lead?: string;
+    }
+  | {
+      id: string;
+      role: "agent";
+      kind: "note";
+      text: string;
+      tone: NoteTone;
+    }
+  | {
+      id: string;
+      role: "agent";
+      kind: "mutual_funds";
+      payload: MutualFundsPayload;
+    }
+  | {
+      id: string;
+      role: "agent";
+      kind: "live_market";
+      payload: LiveMarketPayload;
+    }
   | {
       id: string;
       role: "agent";

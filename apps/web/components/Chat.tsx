@@ -5,8 +5,11 @@ import type {
   AdvisorBriefing,
   EvaluationResult,
   HoldingsPayload,
+  LiveMarketPayload,
   MarketForecast,
   MarketTrend,
+  MutualFundsPayload,
+  NoteTone,
   Portfolio,
   PortfolioAnalytics,
   RelevantNews,
@@ -30,12 +33,16 @@ import {
   type SerializedMsg,
   type Thread,
 } from "@/lib/threads";
+import { Markdown } from "@/components/Markdown";
 import { BriefingCard } from "@/components/cards/BriefingCard";
 import { CausalGraphCard } from "@/components/cards/CausalGraphCard";
 import { ForecastCard } from "@/components/cards/ForecastCard";
 import { HoldingsCard } from "@/components/cards/HoldingsCard";
+import { LiveMarketCard } from "@/components/cards/LiveMarketCard";
 import { MarketSnapshotCard } from "@/components/cards/MarketSnapshotCard";
+import { MutualFundsCard } from "@/components/cards/MutualFundsCard";
 import { NewsCard } from "@/components/cards/NewsCard";
+import { NoteCard } from "@/components/cards/NoteCard";
 import {
   DEFAULT_STEPS,
   ReasoningTraceCard,
@@ -175,7 +182,25 @@ export function Chat({
     [],
   );
 
-  const appendText = useCallback((id: string, chunk: string) => {
+  // Throttled typewriter: chunks accumulate in a buffer and flush on a fixed
+  // cadence so React doesn't re-render on every micro-token. ~30ms tick gives
+  // a paced reveal without dropping fidelity.
+  const textBufferRef = useRef<{ id: string; pending: string; timer: number | null }>({
+    id: "",
+    pending: "",
+    timer: null,
+  });
+
+  const flushTextBuffer = useCallback(() => {
+    const buf = textBufferRef.current;
+    if (!buf.id || !buf.pending) {
+      buf.timer = null;
+      return;
+    }
+    const id = buf.id;
+    const chunk = buf.pending;
+    buf.pending = "";
+    buf.timer = null;
     setMessages((ms) =>
       ms.map((x) =>
         x.id === id && x.role === "agent" && x.kind === "text"
@@ -183,6 +208,42 @@ export function Chat({
           : x,
       ),
     );
+  }, []);
+
+  const appendText = useCallback(
+    (id: string, chunk: string) => {
+      const buf = textBufferRef.current;
+      // Switching ids: flush whatever's pending immediately under the old id.
+      if (buf.id && buf.id !== id && buf.pending) {
+        const prev = buf.pending;
+        const prevId = buf.id;
+        buf.pending = "";
+        setMessages((ms) =>
+          ms.map((x) =>
+            x.id === prevId && x.role === "agent" && x.kind === "text"
+              ? { ...x, text: x.text + prev }
+              : x,
+          ),
+        );
+      }
+      buf.id = id;
+      buf.pending += chunk;
+      if (buf.timer == null) {
+        buf.timer = window.setTimeout(flushTextBuffer, 30);
+      }
+    },
+    [flushTextBuffer],
+  );
+
+  // Force-flush on unmount so trailing text isn't dropped.
+  useEffect(() => {
+    return () => {
+      const buf = textBufferRef.current;
+      if (buf.timer != null) {
+        window.clearTimeout(buf.timer);
+        buf.timer = null;
+      }
+    };
   }, []);
 
   const handlePrompt = useCallback(
@@ -323,6 +384,15 @@ export function Chat({
               top_gainer?: HoldingsPayload["top_gainer"];
               top_loser?: HoldingsPayload["top_loser"];
               day_change_pct?: number;
+              text?: string;
+              tone?: NoteTone;
+              funds?: MutualFundsPayload["funds"];
+              weighted_day_change_pct?: number;
+              indices?: LiveMarketPayload["indices"];
+              avg_change_pct?: number;
+              sentiment?: LiveMarketPayload["sentiment"];
+              focus?: string;
+              lead?: string;
             };
             if (d.kind === "market" && d.trend) {
               push({
@@ -332,11 +402,19 @@ export function Chat({
                 trend: d.trend,
               });
             } else if (d.kind === "news" && d.news) {
+              const f = d.focus as
+                | "all"
+                | "negative"
+                | "positive"
+                | "neutral"
+                | undefined;
               push({
                 id: `a${Date.now()}-n`,
                 role: "agent",
                 kind: "news",
                 news: d.news,
+                focus: f ?? "all",
+                lead: d.lead,
               });
             } else if (d.kind === "risk" && d.analytics) {
               push({
@@ -382,6 +460,7 @@ export function Chat({
                 scan: d.scan,
               });
             } else if (d.kind === "holdings" && d.holdings) {
+              const f = d.focus as "all" | "losers" | "gainers" | undefined;
               push({
                 id: `a${Date.now()}-hp`,
                 role: "agent",
@@ -391,6 +470,39 @@ export function Chat({
                   top_gainer: d.top_gainer ?? null,
                   top_loser: d.top_loser ?? null,
                   day_change_pct: d.day_change_pct ?? 0,
+                },
+                focus: f ?? "all",
+                lead: d.lead,
+              });
+            } else if (d.kind === "note" && typeof d.text === "string") {
+              push({
+                id: `a${Date.now()}-nt`,
+                role: "agent",
+                kind: "note",
+                text: d.text,
+                tone: d.tone ?? "neutral",
+              });
+            } else if (d.kind === "mutual_funds" && d.funds) {
+              push({
+                id: `a${Date.now()}-mf`,
+                role: "agent",
+                kind: "mutual_funds",
+                payload: {
+                  summary: d.summary ?? "",
+                  funds: d.funds,
+                  weighted_day_change_pct: d.weighted_day_change_pct ?? 0,
+                },
+              });
+            } else if (d.kind === "live_market" && d.indices) {
+              push({
+                id: `a${Date.now()}-lm`,
+                role: "agent",
+                kind: "live_market",
+                payload: {
+                  indices: d.indices,
+                  avg_change_pct: d.avg_change_pct ?? 0,
+                  sentiment: d.sentiment ?? "NEUTRAL",
+                  summary: d.summary ?? "",
                 },
               });
             }
@@ -460,18 +572,22 @@ export function Chat({
               }));
             }
           } else if (frame.event === "error") {
-            const e = frame.data as { error: string };
-            if (!replyStarted) {
-              setTyping(false);
-              push({
-                id: `a${Date.now()}-e`,
-                role: "agent",
-                kind: "text",
-                text: `I hit an error: ${e.error}`,
-              });
-            } else {
-              appendText(replyId, `\n\n(error: ${e.error})`);
-            }
+            const e = frame.data as { error: string; code?: number };
+            setTyping(false);
+            // 4xx → likely user-facing routing/input issue, surface short text.
+            // 5xx / unknown → a system hiccup; friendly note instead of stack.
+            const friendly =
+              e.code && e.code < 500
+                ? e.error
+                : "I hit a snag on my end — give it a moment and try again. " +
+                  "If it keeps happening, the model may be rate-limited.";
+            push({
+              id: `a${Date.now()}-e`,
+              role: "agent",
+              kind: "note",
+              text: friendly,
+              tone: "negative",
+            });
             break;
           }
         }
@@ -512,14 +628,19 @@ export function Chat({
         });
       } catch (err) {
         setTyping(false);
+        const detail = err instanceof Error ? err.message : String(err);
         push({
           id: `a${Date.now()}-e`,
           role: "agent",
-          kind: "text",
-          text: `Couldn't reach the agent: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          kind: "note",
+          text:
+            "I couldn't reach the agent just now — looks like the connection " +
+            "dropped. Try sending again.",
+          tone: "negative",
         });
+        // Console keeps the technical detail for debugging without putting a
+        // stack-trace in the user's chat.
+        console.warn("chat stream failed:", detail);
       }
     },
     [
@@ -923,14 +1044,10 @@ function AgentBody({
   msg: Extract<Msg, { role: "agent" }>;
   onPrompt: (text: string, intent?: Intent) => void;
 }) {
-  if (msg.kind === "text")
-    return (
-      <p style={{ whiteSpace: "pre-wrap", margin: 0 }}>
-        {msg.text}
-      </p>
-    );
+  if (msg.kind === "text") return <Markdown>{msg.text}</Markdown>;
   if (msg.kind === "market") return <MarketSnapshotCard trend={msg.trend} />;
-  if (msg.kind === "news") return <NewsCard news={msg.news} />;
+  if (msg.kind === "news")
+    return <NewsCard news={msg.news} focus={msg.focus} lead={msg.lead} />;
   if (msg.kind === "risk") return <RiskCard analytics={msg.analytics} />;
   if (msg.kind === "stock")
     return <StockCard quote={msg.quote} summary={msg.summary} />;
@@ -940,7 +1057,24 @@ function AgentBody({
   if (msg.kind === "sector_performance")
     return <SectorPerformanceCard sector={msg.sector} />;
   if (msg.kind === "trend_scan") return <TrendScanCard scan={msg.scan} />;
-  if (msg.kind === "holdings") return <HoldingsCard payload={msg.payload} />;
+  if (msg.kind === "holdings")
+    return (
+      <HoldingsCard
+        payload={msg.payload}
+        focus={msg.focus}
+        lead={msg.lead}
+      />
+    );
+  if (msg.kind === "mutual_funds") return <MutualFundsCard payload={msg.payload} />;
+  if (msg.kind === "live_market") return <LiveMarketCard payload={msg.payload} />;
+  if (msg.kind === "note") {
+    // Animate only fresh notes — those whose id timestamp is within the last
+    // 5 seconds. Persisted notes (reload, history) render instantly.
+    const m = msg.id.match(/^a(\d+)/);
+    const ts = m ? parseInt(m[1], 10) : 0;
+    const fresh = ts > 0 && Date.now() - ts < 5000;
+    return <NoteCard text={msg.text} tone={msg.tone} animate={fresh} />;
+  }
   if (msg.kind === "reasoning")
     return (
       <ReasoningTraceCard

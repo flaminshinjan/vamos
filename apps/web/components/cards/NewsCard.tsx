@@ -2,15 +2,46 @@
 
 import type { RelevantNews } from "@/lib/api";
 
-export function NewsCard({ news }: { news: RelevantNews[] }) {
+type Focus = "all" | "negative" | "positive" | "neutral";
+
+const FOCUS_LABEL: Record<Focus, string> = {
+  all: "Classified news",
+  negative: "Negative drivers",
+  positive: "Positive drivers",
+  neutral: "Neutral signals",
+};
+
+export function NewsCard({
+  news,
+  focus = "all",
+  lead,
+}: {
+  news: RelevantNews[];
+  focus?: Focus;
+  lead?: string;
+}) {
+  const title = FOCUS_LABEL[focus] ?? FOCUS_LABEL.all;
   return (
     <div className="card fade-up">
       <div className="card-head">
         <div className="card-title">
-          <span className="dot accent" /> Classified news · {news.length} signals
+          <span className="dot accent" /> {title} · {news.length} signal
+          {news.length === 1 ? "" : "s"}
         </div>
         <div className="card-sub">sentiment + scope + impact</div>
       </div>
+      {lead && (
+        <div
+          style={{
+            padding: "10px 18px 0",
+            fontSize: 12.5,
+            color: "var(--ink-2)",
+            lineHeight: 1.5,
+          }}
+        >
+          {lead}
+        </div>
+      )}
       <div className="card-body" style={{ padding: 0 }}>
         {news.map((n, i) => {
           const s = n.article.sentiment;

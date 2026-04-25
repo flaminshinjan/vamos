@@ -33,5 +33,15 @@ def card(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     return {"event": "card", "data": {"kind": kind, **payload}}
 
 
+def note(text: str, tone: str = "neutral") -> dict[str, Any]:
+    """A plain text bubble — no card chrome. Used for graceful degradation
+    and for text-only tools (explain_portfolio_move, etc.).
+
+    ``tone`` is one of ``"neutral"``, ``"positive"``, ``"negative"`` and
+    lightly tints the bubble on the frontend.
+    """
+    return {"event": "card", "data": {"kind": "note", "text": text, "tone": tone}}
+
+
 def error(msg: str, code: int = 502) -> dict[str, Any]:
     return {"event": "error", "data": {"error": msg, "code": code}}

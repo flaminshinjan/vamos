@@ -15,7 +15,7 @@ from vamos_core.schemas.portfolio import Portfolio
 
 from vamos_agents.providers import ProviderError, finance_query, graph_closes
 from vamos_agents.workflows._deps import WorkflowDeps
-from vamos_agents.workflows._events import card, error, tool_done, tool_start
+from vamos_agents.workflows._events import card, note, tool_done, tool_start
 from vamos_agents.workflows.schemas import TrendMover, TrendScan
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,12 @@ MAX_HOLDINGS = 8
 
 def scan_trends(portfolio: Portfolio, *, deps: WorkflowDeps) -> Iterator[dict]:
     if deps.serp is None:
-        yield error("SERPAPI_KEY not set — trend scan unavailable", code=503)
+        yield note(
+            "Live market data isn't connected, so I can't scan momentum "
+            "across your holdings. I can still rank today's per-holding moves "
+            "from local data — ask 'how are my stocks doing'.",
+            tone="neutral",
+        )
         return
 
     holdings = sorted(
@@ -33,7 +38,11 @@ def scan_trends(portfolio: Portfolio, *, deps: WorkflowDeps) -> Iterator[dict]:
     )[:MAX_HOLDINGS]
     symbols = [h.symbol for h in holdings]
     if not symbols:
-        yield error("Portfolio has no stock holdings to scan", code=400)
+        yield note(
+            "You don't have any direct stock holdings to scan — only mutual "
+            "funds. Ask 'how are my mutual funds doing' to see those.",
+            tone="neutral",
+        )
         return
 
     ts = time.perf_counter()
@@ -61,8 +70,16 @@ def scan_trends(portfolio: Portfolio, *, deps: WorkflowDeps) -> Iterator[dict]:
     rated.sort(key=lambda m: m.change_pct_5d or 0)
     down = [m for m in rated if (m.change_pct_5d or 0) < 0][:5]
     up = list(reversed([m for m in rated if (m.change_pct_5d or 0) > 0]))[:5]
-    out = TrendScan(up_movers=up, down_movers=down, summary=_summarize(up, down, len(symbols)))
     yield tool_done("rank_movers", ts)
+    if not rated:
+        yield note(
+            f"I couldn't pull momentum data for any of your top {len(symbols)} "
+            "holdings just now — the data provider didn't return clean prices. "
+            "Try again in a moment.",
+            tone="negative",
+        )
+        return
+    out = TrendScan(up_movers=up, down_movers=down, summary=_summarize(up, down, len(symbols)))
     yield card("trend_scan", {"scan": out.model_dump()})
 
 

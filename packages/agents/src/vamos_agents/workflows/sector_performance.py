@@ -13,7 +13,7 @@ from typing import Iterator
 
 from vamos_agents.providers import ProviderError
 from vamos_agents.workflows._deps import WorkflowDeps
-from vamos_agents.workflows._events import card, error, tool_done, tool_start
+from vamos_agents.workflows._events import card, note, tool_done, tool_start
 from vamos_agents.workflows.schemas import NewsRef, SectorPerformanceCard, StockQuote
 
 logger = logging.getLogger(__name__)
@@ -35,13 +35,19 @@ def lookup_sector(sector: str, *, deps: WorkflowDeps) -> Iterator[dict]:
     sec = sector.upper().strip()
     index_query = _SECTOR_INDEX.get(sec)
     if index_query is None:
-        yield error(
-            f"Sector '{sector}' not supported. Try one of: {', '.join(_SECTOR_INDEX)}",
-            code=400,
+        yield note(
+            f"I don't have live data for '{sector}' — supported sectors are: "
+            f"{', '.join(_SECTOR_INDEX)}.",
+            tone="neutral",
         )
         return
     if deps.serp is None:
-        yield error("SERPAPI_KEY not set — sector lookup unavailable", code=503)
+        yield note(
+            f"Live market data isn't connected, so I can't pull fresh "
+            f"{sec} sector data. I can show your portfolio's exposure to "
+            f"{sec} from local data — ask 'show my concentration risk'.",
+            tone="neutral",
+        )
         return
 
     # 1. sector index quote

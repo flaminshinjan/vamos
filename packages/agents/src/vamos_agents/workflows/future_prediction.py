@@ -14,7 +14,7 @@ from typing import Iterator
 
 from vamos_agents.providers import ProviderError, graph_closes
 from vamos_agents.workflows._deps import WorkflowDeps
-from vamos_agents.workflows._events import card, error, tool_done, tool_start
+from vamos_agents.workflows._events import card, note, tool_done, tool_start
 from vamos_agents.workflows.schemas import HistoricalPoint, MarketForecast, NewsRef
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,12 @@ _NIFTY_QUERY = "NIFTY_50:INDEXNSE"
 
 def forecast_market(*, deps: WorkflowDeps) -> Iterator[dict]:
     if deps.serp is None:
-        yield error("SERPAPI_KEY not set — forecast unavailable", code=503)
+        yield note(
+            "Live market data isn't connected, so I can't run the forecast "
+            "pipeline (it needs fresh news + NIFTY history). I can show "
+            "today's local market snapshot — ask 'how's the market today'.",
+            tone="neutral",
+        )
         return
 
     # 1. current trends
@@ -38,8 +43,13 @@ def forecast_market(*, deps: WorkflowDeps) -> Iterator[dict]:
     try:
         news_raw = deps.serp.search_news("Indian stock market NIFTY today", num=15)
     except ProviderError as e:
+        logger.warning("forecast news failed: %s", e)
         yield tool_done("check_current_market_trends", ts)
-        yield error(str(e))
+        yield note(
+            "Couldn't pull live news for the forecast — the data provider "
+            "isn't responding. Try again in a moment.",
+            tone="negative",
+        )
         return
     headlines = [NewsRef(**n) for n in news_raw]
     current_summary = _haiku_rank(deps, headlines)
@@ -51,8 +61,13 @@ def forecast_market(*, deps: WorkflowDeps) -> Iterator[dict]:
     try:
         finance_payload = deps.serp.google_finance(_NIFTY_QUERY, window="1M")
     except ProviderError as e:
+        logger.warning("forecast nifty history failed: %s", e)
         yield tool_done("check_previous_trends", ts)
-        yield error(str(e))
+        yield note(
+            "Got the news but couldn't pull NIFTY history — the data provider "
+            "is having a moment. Try again shortly.",
+            tone="negative",
+        )
         return
     historical = _to_history(finance_payload)
     yield tool_done("check_previous_trends", ts)

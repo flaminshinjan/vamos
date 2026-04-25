@@ -274,6 +274,45 @@ export type HoldingsPayload = {
   day_change_pct: number;
 };
 
+export type NoteTone = "neutral" | "positive" | "negative";
+
+export type NotePayload = {
+  text: string;
+  tone: NoteTone;
+};
+
+export type MutualFundItem = {
+  scheme_code: string;
+  scheme_name: string;
+  category: string;
+  amc: string;
+  current_value: number;
+  weight_pct: number;
+  day_change_pct: number;
+  day_change_abs: number;
+  overall_gain_pct: number;
+};
+
+export type MutualFundsPayload = {
+  summary: string;
+  funds: MutualFundItem[];
+  weighted_day_change_pct: number;
+};
+
+export type LiveMarketIndex = {
+  symbol: string;
+  price: number | null;
+  change_pct: number | null;
+  currency?: string | null;
+};
+
+export type LiveMarketPayload = {
+  indices: LiveMarketIndex[];
+  avg_change_pct: number;
+  sentiment: "BULLISH" | "BEARISH" | "NEUTRAL" | string;
+  summary: string;
+};
+
 // ---------- API ----------
 
 export const api = {

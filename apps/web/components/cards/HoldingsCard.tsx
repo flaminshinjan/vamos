@@ -3,7 +3,23 @@
 import type { HoldingsPayload } from "@/lib/api";
 import { formatINR } from "@/lib/format";
 
-export function HoldingsCard({ payload }: { payload: HoldingsPayload }) {
+type Focus = "all" | "losers" | "gainers";
+
+const FOCUS_LABEL: Record<Focus, string> = {
+  all: "Holdings performance",
+  losers: "Losers today",
+  gainers: "Gainers today",
+};
+
+export function HoldingsCard({
+  payload,
+  focus = "all",
+  lead,
+}: {
+  payload: HoldingsPayload;
+  focus?: Focus;
+  lead?: string;
+}) {
   const { holdings, top_gainer, top_loser, day_change_pct } = payload;
   const totalColor =
     day_change_pct == null
@@ -12,6 +28,9 @@ export function HoldingsCard({ payload }: { payload: HoldingsPayload }) {
         ? "var(--neg)"
         : "var(--pos)";
 
+  const title = FOCUS_LABEL[focus] ?? FOCUS_LABEL.all;
+  const positionLabel = `${holdings.length} position${holdings.length === 1 ? "" : "s"}`;
+
   return (
     <div className="card fade-up">
       <div className="card-head">
@@ -19,10 +38,22 @@ export function HoldingsCard({ payload }: { payload: HoldingsPayload }) {
           <span
             className={`dot ${day_change_pct < 0 ? "neg" : "pos"}`}
           />
-          Holdings performance
+          {title}
         </div>
-        <div className="card-sub">{holdings.length} positions · NSE close</div>
+        <div className="card-sub">{positionLabel} · NSE close</div>
       </div>
+      {lead && (
+        <div
+          style={{
+            padding: "10px 18px 0",
+            fontSize: 12.5,
+            color: "var(--ink-2)",
+            lineHeight: 1.5,
+          }}
+        >
+          {lead}
+        </div>
+      )}
       <div className="card-body">
         <div
           style={{
