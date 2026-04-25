@@ -15,6 +15,7 @@ we can't serve.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Iterator
 
@@ -494,6 +495,42 @@ Keep replies tight. A sophisticated investor should feel their time is respected
 """
 
 
+# ── Decision-question hard guard ─────────────────────────────────────
+#
+# These are obvious "should I act / what should I do / is this a big deal"
+# patterns. When the user message matches, we omit the tool catalog entirely
+# from the Claude call so the model literally cannot pick a tool — it must
+# answer in text. The system-prompt rule is the soft signal; this is the hard
+# signal. Necessary because under multi-turn conversation pressure Claude
+# tends to keep using tools from prior turns even when a clean text reply
+# would be the right answer.
+#
+# This is INTENTIONALLY narrow — it only catches unambiguous decision/advice
+# phrasings. Anything ambiguous still goes through the regular tool router.
+
+_DECISION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\bwhat\s+should\s+i\s+(do|sell|buy|hold|focus|invest|change|pay\s+attention)",
+        r"\bshould\s+i\s+(sell|buy|hold|act|change|invest|do\s+(anything|something)|"
+        r"worry|care|panic|wait|ignore|chill|fix|leave|be\s+(worried|concerned|doing|paying))",
+        r"\bwhat\s+would\s+you\s+do\b",
+        r"\bdo\s+i\s+need\s+to\s+(do|act|change|fix|worry|panic|sell|buy|chill)",
+        r"\bis\s+this\s+(a\s+)?big\s+deal\b",
+        r"\b(give\s+me\s+a|any|your)\s+recommendation\b",
+        r"\bis\s+this\s+(important|serious|temporary|normal|just\s+noise)\b",
+        r"\bdoes\s+this\s+matter\b",
+        r"\bshould\s+i\s+(just\s+)?ignore\b",
+        r"\bis\s+it\s+time\s+to\s+act\b",
+        r"\bwhat\s+do\s+you\s+(suggest|recommend|advise)\b",
+    )
+)
+
+
+def _is_decision_question(text: str) -> bool:
+    return any(p.search(text) for p in _DECISION_PATTERNS)
+
+
 # ── Event kinds ───────────────────────────────────────────────────────
 TEXT_DELTA = "text_delta"
 TOOL_CALL = "tool_call"
@@ -560,14 +597,23 @@ def chat_stream(
     tool_uses: list[dict[str, Any]] = []
     usage: dict[str, int] = {}
 
+    is_decision = _is_decision_question(user_message)
+    if is_decision:
+        logger.info("Decision/advice question detected — skipping tool catalog for this turn")
+
+    stream_kwargs: dict[str, Any] = {
+        "model": settings.reasoning_model,
+        "max_tokens": 768,
+        "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        "messages": messages,
+    }
+    # For decision/advice questions, omit tools entirely so Claude is forced to
+    # answer in text. For everything else, send the full catalog.
+    if not is_decision:
+        stream_kwargs["tools"] = catalog
+
     try:
-        with client.messages.stream(
-            model=settings.reasoning_model,
-            max_tokens=768,
-            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            tools=catalog,
-            messages=messages,
-        ) as stream:
+        with client.messages.stream(**stream_kwargs) as stream:
             for event in stream:
                 etype = getattr(event, "type", None)
                 if etype == "content_block_start":
