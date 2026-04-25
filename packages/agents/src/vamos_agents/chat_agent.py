@@ -29,6 +29,10 @@ from vamos_core.analytics import (
 )
 
 from vamos_agents.advisor import AdvisorAgent
+from vamos_agents.live_data import (
+    enrich_portfolio_with_live_quotes,
+    fetch_live_news,
+)
 from vamos_agents.providers import get_serpapi
 from vamos_agents.settings import Settings, get_settings
 from vamos_agents.workflows import (
@@ -314,7 +318,17 @@ def _build_tool_catalog(*, has_serp: bool) -> list[dict]:
     return tools
 
 
-def _build_system(portfolio, trend, analytics, news_count: int, available: list[str], snapshot_date: str) -> str:
+def _build_system(
+    portfolio,
+    trend,
+    analytics,
+    news_count: int,
+    available: list[str],
+    snapshot_date: str,
+    *,
+    prices_live: bool = False,
+    news_live: bool = False,
+) -> str:
     alerts = ""
     if analytics.concentration_risk and analytics.alerts:
         alerts = " · ALERT: " + "; ".join(
@@ -343,11 +357,23 @@ def _build_system(portfolio, trend, analytics, news_count: int, available: list[
         else "  → (single-stock diagnosis not available this turn)"
     )
 
+    price_source = "LIVE (SerpApi · Google Finance, refreshed this turn)" if prices_live else f"local snapshot ({snapshot_date}, mock)"
+    news_source = "LIVE (SerpApi · Google News, classified by Haiku, cached 10m)" if news_live else f"local mock feed ({snapshot_date})"
+
     return f"""You are Aarthik — an autonomous financial advisor for Indian markets.
 
 You're speaking with {portfolio.user_name} (portfolio: {portfolio.portfolio_type.value.lower().replace("_", " ")}, risk: {portfolio.risk_profile.value.lower()}).
 
-Local snapshot (mock data; may be older than today): as of {snapshot_date}
+Data sources for this turn:
+- Stock prices & day P&L: {price_source}
+- News feed: {news_source}
+- Broad market index (NIFTY/SENSEX): when user asks about "the market today",
+  use lookup_market for live indices.
+- Portfolio composition (which tickers / quantities): user-defined input
+  (no brokerage integration — symbols & quantities are configured, but every
+  price / value / day-change above is recomputed from the source named above).
+
+Today's read:
 - Market sentiment: {trend.overall_sentiment.value} ({trend.avg_broad_change:+.2f}% broad avg across NIFTY50/SENSEX)
 - Advancing sectors: {trend.advancing_sectors} / Declining: {trend.declining_sectors}
 - Portfolio day P&L: {analytics.day_summary.day_change_percent:+.2f}% ({analytics.day_summary.day_change_absolute:+,.0f} INR){alerts}
@@ -480,9 +506,10 @@ or positives — it surfaces noise and dilutes the answer.
    themselves. Held stocks: {held_stocks}.
 3. If a tool returns "data unavailable", relay that honestly.
 4. Numbers must come from the data above or a tool result — never invent.
-5. The local snapshot is dated {snapshot_date}. If the user implies "right now"
-   or "today" and that date isn't today, prefer LIVE tools (lookup_market,
-   lookup_stock, diagnose_stock, lookup_sector) when available.
+5. Prices and news above may be live or mock — see the "Data sources" line
+   at the top. If the user asks about freshness, be honest: "Stock prices
+   are live from Google Finance; news is live too" (when prices_live + news_live)
+   OR "Stock prices are from a local snapshot dated {snapshot_date}" (when not).
 
 ## Style
 
@@ -574,14 +601,24 @@ def chat_stream(
         yield {"event": ERROR, "data": {"error": str(e), "code": 404}}
         return
 
-    snapshot = loader.market_snapshot
-    trend = compute_market_trend(snapshot)
-    analytics = compute_portfolio_analytics(portfolio)
-    ranked_news = rank_news_for_portfolio(loader.news, portfolio, top_k=8)
-
     client = Anthropic(api_key=settings.anthropic_api_key, timeout=settings.request_timeout_s)
     serp = get_serpapi(settings)
     deps = WorkflowDeps(anthropic=client, settings=settings, serp=serp)
+
+    # NOTE: live enrichment used to happen here. We moved it INTO the
+    # dispatch handlers so the routing call (Claude → tool decision) starts
+    # streaming events within ~1s instead of after a 10-20s SerpApi fetch.
+    # The system prompt is built from mock data, which is fine: routing
+    # decisions key on user intent, not exact numbers. Tools that actually
+    # need live values do their own fast cached lookup at dispatch time.
+    prices_live = False
+    news_live = False
+    news_articles = loader.news
+
+    snapshot = loader.market_snapshot
+    trend = compute_market_trend(snapshot)
+    analytics = compute_portfolio_analytics(portfolio)
+    ranked_news = rank_news_for_portfolio(news_articles, portfolio, top_k=8)
 
     catalog = _build_tool_catalog(has_serp=serp is not None)
     system = _build_system(
@@ -591,6 +628,8 @@ def chat_stream(
         len(ranked_news),
         [t["name"] for t in catalog],
         snapshot.date,
+        prices_live=prices_live,
+        news_live=news_live,
     )
     messages: list[dict[str, Any]] = [*history, {"role": "user", "content": user_message}]
 
@@ -708,6 +747,66 @@ def chat_stream(
 # ── Dispatch ─────────────────────────────────────────────────────────
 
 
+def _lazy_enrich_portfolio(
+    portfolio,
+    *,
+    deps: WorkflowDeps,
+) -> tuple[Any, bool]:
+    """Refresh portfolio prices via SerpApi if available. Best-effort —
+    returns ``(portfolio, prices_live)`` and never raises."""
+    if deps.serp is None:
+        return portfolio, False
+    try:
+        return enrich_portfolio_with_live_quotes(portfolio, serp=deps.serp)
+    except Exception as e:
+        logger.warning("Lazy portfolio enrichment failed: %s", e)
+        return portfolio, False
+
+
+def _lazy_enrich_news(
+    portfolio,
+    fallback_news: list,
+    *,
+    deps: WorkflowDeps,
+) -> tuple[list, bool]:
+    """Fetch + classify live news if SerpApi available. Best-effort."""
+    if deps.serp is None or deps.anthropic is None:
+        return fallback_news, False
+    try:
+        return fetch_live_news(
+            portfolio,
+            serp=deps.serp,
+            anthropic=deps.anthropic,
+            settings=deps.settings,
+            fallback=fallback_news,
+        )
+    except Exception as e:
+        logger.warning("Lazy news fetch failed: %s", e)
+        return fallback_news, False
+
+
+def _emit_refresh_started(label: str, detail: str) -> dict[str, Any]:
+    return {
+        "event": TOOL_CALL,
+        "data": {
+            "id": f"refresh-{label}",
+            "label": label,
+            "detail": detail,
+            "status": "active",
+        },
+    }
+
+
+def _emit_refresh_done(label: str) -> dict[str, Any]:
+    return {
+        "event": TOOL_CALL,
+        "data": {
+            "id": f"refresh-{label}",
+            "status": "done",
+        },
+    }
+
+
 def _dispatch(
     tu: dict[str, Any],
     *,
@@ -729,6 +828,15 @@ def _dispatch(
     if name == "show_classified_news":
         focus = str(inp.get("focus", "all")).lower()
         lead = str(inp.get("lead", "")).strip()
+        # Lazy-fetch live news here (cached 10 min). Falls back to mock on failure.
+        if deps.serp is not None:
+            yield _emit_refresh_started("Fetching live news", "Google News + classification")
+            live_news, news_live = _lazy_enrich_news(portfolio, [r.article for r in ranked_news], deps=deps)
+            yield _emit_refresh_done("Fetching live news")
+            if news_live:
+                # Re-rank live news against the portfolio
+                from vamos_core.analytics import rank_news_for_portfolio
+                ranked_news = rank_news_for_portfolio(live_news, portfolio, top_k=8)
         items = ranked_news
         if focus == "negative":
             items = [r for r in items if r.article.sentiment.value.upper() in ("NEGATIVE", "BEARISH")]
@@ -772,12 +880,24 @@ def _dispatch(
         return
 
     if name == "show_concentration_risk":
+        if deps.serp is not None:
+            yield _emit_refresh_started("Refreshing live prices", "Google Finance")
+            portfolio, _ = _lazy_enrich_portfolio(portfolio, deps=deps)
+            yield _emit_refresh_done("Refreshing live prices")
+            from vamos_core.analytics import compute_portfolio_analytics
+            analytics = compute_portfolio_analytics(portfolio)
         yield {"event": CARD, "data": {"kind": "risk", "analytics": analytics.model_dump()}}
         return
 
     if name == "show_my_holdings_performance":
         focus = str(inp.get("focus", "all")).lower()
         lead = str(inp.get("lead", "")).strip()
+        if deps.serp is not None and portfolio.holdings.stocks:
+            yield _emit_refresh_started("Refreshing live prices", "Google Finance")
+            portfolio, _ = _lazy_enrich_portfolio(portfolio, deps=deps)
+            yield _emit_refresh_done("Refreshing live prices")
+            from vamos_core.analytics import compute_portfolio_analytics
+            analytics = compute_portfolio_analytics(portfolio)
         if not portfolio.holdings.stocks:
             yield {
                 "event": CARD,
@@ -843,6 +963,21 @@ def _dispatch(
         return
 
     if name == "explain_portfolio_move":
+        # explain wants both live prices AND live news so the causal read is real.
+        if deps.serp is not None:
+            yield _emit_refresh_started("Refreshing live data", "Prices + news")
+            portfolio, _ = _lazy_enrich_portfolio(portfolio, deps=deps)
+            live_news, news_live = _lazy_enrich_news(
+                portfolio, [r.article for r in ranked_news], deps=deps
+            )
+            yield _emit_refresh_done("Refreshing live data")
+            from vamos_core.analytics import (
+                compute_portfolio_analytics,
+                rank_news_for_portfolio,
+            )
+            analytics = compute_portfolio_analytics(portfolio)
+            if news_live:
+                ranked_news = rank_news_for_portfolio(live_news, portfolio, top_k=8)
         yield from explain_portfolio_move(
             portfolio,
             trend=trend,
@@ -853,6 +988,12 @@ def _dispatch(
         return
 
     if name == "compare_portfolio_to_market":
+        if deps.serp is not None:
+            yield _emit_refresh_started("Refreshing live prices", "Google Finance")
+            portfolio, _ = _lazy_enrich_portfolio(portfolio, deps=deps)
+            yield _emit_refresh_done("Refreshing live prices")
+            from vamos_core.analytics import compute_portfolio_analytics
+            analytics = compute_portfolio_analytics(portfolio)
         yield from compare_portfolio_to_market(
             portfolio,
             trend=trend,

@@ -295,11 +295,14 @@ export function Chat({
         let finalEval: EvaluationResult | null = null;
 
         for await (const frame of readSSE(res)) {
+          // Turn off the typing indicator on the FIRST event of any kind —
+          // not just text_delta — so cards/tool-calls without preceding
+          // text don't leave the typing dot spinning.
+          setTyping(false);
           if (frame.event === "text_delta") {
             const d = frame.data as { text: string };
             if (!replyStarted) {
               replyStarted = true;
-              setTyping(false);
               push({ id: replyId, role: "agent", kind: "text", text: "" });
             }
             appendText(replyId, d.text);
