@@ -164,16 +164,13 @@ _TOOL_SHOW_MFS = {
 _TOOL_EXPLAIN_MOVE = {
     "name": "explain_portfolio_move",
     "description": (
-        "Lightweight 3–4 sentence text explanation of why the user's portfolio "
-        "moved today. Uses local holdings + market trend + ranked news. Cheap "
-        "(~1s, single Haiku call), no card, no evaluator. Use for: 'why is my "
-        "portfolio moving / up / down', 'what's happening to my money', 'what's "
-        "going on with my investments', 'why am I in loss / making money', "
-        "'what's pushing my portfolio', 'what changed today', 'what's the main "
-        "thing for me today'. Do NOT use for portfolio-wide deep causal "
-        "questions that explicitly ask for a 'briefing' or 'full causal chain' "
-        "— those go to produce_briefing. Do NOT use for single-stock 'why' "
-        "questions — use diagnose_stock."
+        "LIGHT version — 3-4 sentence text-only note explaining what's moving "
+        "the portfolio. Use ONLY for casual / lazy framings: 'what's happening "
+        "to my money', 'anything impacting my book', 'what changed today', "
+        "'what's the story'. Do NOT use for the canonical 'why did my "
+        "portfolio move today' or 'why am I down' — those need the RICH "
+        "produce_briefing card with causal chains + graph. Do NOT use for "
+        "single-stock 'why' — use diagnose_stock."
     ),
     "input_schema": {"type": "object", "properties": {}},
 }
@@ -280,13 +277,15 @@ _TOOL_DIAGNOSE_STOCK = {
 _TOOL_PRODUCE_BRIEFING = {
     "name": "produce_briefing",
     "description": (
-        "Run the FULL causal briefing pipeline — maps news to sectors to held "
-        "stocks to portfolio impact, with conflict flags, confidence score, "
-        "and self-evaluation. Heavy (~5-10s) and produces a structured card "
-        "with causal chains. Use ONLY when the user explicitly asks for a "
-        "briefing, full causal chain, deep analysis, or 'trace exactly how X "
-        "reached my portfolio'. For casual 'why is my portfolio moving' use "
-        "explain_portfolio_move instead — same answer in 1s with no card."
+        "RICH causal briefing — runs the full pipeline (news → sectors → held "
+        "stocks → portfolio impact) and renders a STRUCTURED CARD with "
+        "headline, summary, causal chains, key insights, conflicts, "
+        "recommendations, confidence, self-evaluation, plus a causal graph. "
+        "Heavy (~5-10s). USE FOR THE CANONICAL ASKS: 'why did my portfolio "
+        "move (today)', 'why am I down', 'why am I up', 'what's the main "
+        "driver', 'breakdown', 'briefing', 'full causal chain'. The richer "
+        "card is what users expect for these questions. Only fall back to "
+        "explain_portfolio_move for casual / minimal-info variants."
     ),
     "input_schema": {"type": "object", "properties": {}},
 }
@@ -417,11 +416,19 @@ News-driven market ("what's driving today" / "biggest events" / "headlines today
 Forward-looking market ("where is the market headed" / "predict" / "future" / "outlook"):
   → forecast_market
 
-Portfolio causal explanation (the why):
-- "why is my portfolio moving / up / down / in loss / making money"
-- "what's happening to my money" / "what changed today"
-- "what's the main driver today" / "did I miss something"
-- "anything impacting my portfolio" / "what's the story"
+Portfolio causal explanation — RICH version (full briefing card + causal chains + graph):
+- "why did my portfolio move (today)"
+- "why is my portfolio up / down / in loss / making money"
+- "what's the main driver of my portfolio today"
+- "give me the briefing / full picture / causal chain / breakdown"
+- "trace exactly how X reached my portfolio"
+  → produce_briefing  (heavier ~5-10s, but gives the structured card the user expects)
+
+Portfolio causal explanation — LIGHT version (text note only, ~1s):
+- "what's happening to my money"
+- "anything impacting my portfolio" / "what changed today"
+- "what's the story" / "did I miss something"
+- short casual variants where the user clearly doesn't want a full breakdown
   → explain_portfolio_move
 
 Decision / advice / "should I act" questions — **NO TOOL, TEXT REPLY ONLY**:
