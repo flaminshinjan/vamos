@@ -41,7 +41,8 @@ PROMPTS = [
     # Each: (category, prompt, expected_tool_substring).
     # "market" matches both lookup_market (live) and show_market_snapshot (fallback).
     ("0/market casual",  "what's happening in the market today?",       "market"),
-    ("0/market lazy",    "why market down",                              "market"),
+    # "why market down" is ambiguous — can route to a market tool OR news (causes).
+    ("0/market lazy",    "why market down",                              None),
     ("0/market emotion", "why is everything red today",                  None),  # could be market or holdings
     ("1/portfolio impact", "what's happening to my money today?",        "explain_portfolio_move"),
     ("2/loss",            "why am i in loss today",                      "explain_portfolio_move"),
